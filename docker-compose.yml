@@ -1,0 +1,49 @@
+services:
+  bitcoin-trading-bot:
+    build: .
+    container_name: bitcoin-trading-bot
+    restart: unless-stopped
+    environment:
+      - UPBIT_ACCESS_KEY=${UPBIT_ACCESS_KEY}
+      - UPBIT_SECRET_KEY=${UPBIT_SECRET_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      # 로그 파일들을 호스트에 저장
+      - ./logs:/app/logs
+      # .env 파일 마운트 (환경변수 대신 사용 가능)
+      - ./.env:/app/.env:ro
+    networks:
+      - trading-network
+    # 헬스체크 추가
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/trading_log.md') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # 로그 설정
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 로그 모니터링을 위한 간단한 웹서버 (선택사항)
+  log-viewer:
+    image: nginx:alpine
+    container_name: log-viewer
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./logs:/usr/share/nginx/html/logs:ro
+      - ./trading_log.md:/usr/share/nginx/html/trading_log.md:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - trading-network
+    profiles:
+      - monitoring
+
+networks:
+  trading-network:
+    driver: bridge
