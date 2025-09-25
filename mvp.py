@@ -287,19 +287,18 @@ def trade_by_decision(result, upbit, current_price, rsi, ma5, ma20, fng, trade_r
         print("hold", result['reason'])
     
     # MD 파일에 로깅
-    log_to_markdown(
-        decision=result['decision'],
-        reason=result['reason'], 
-        price=current_price,
-        rsi=rsi,
-        ma5=ma5,
-        ma20=ma20,
-        fng=fng,
-        decision_type=decision_type
-    )
+    # log_to_markdown(
+    #     decision=result['decision'],
+    #     reason=result['reason'], 
+    #     price=current_price,
+    #     rsi=rsi,
+    #     ma5=ma5,
+    #     ma20=ma20,
+    #     fng=fng,
+    #     decision_type=decision_type
+    # )
 
 def main_trading_loop():
-    """15분 간격으로 지속 실행되는 메인 트레이딩 루프"""
     load_dotenv()
     access = os.getenv("UPBIT_ACCESS_KEY")
     secret = os.getenv("UPBIT_SECRET_KEY")
@@ -340,11 +339,10 @@ def main_trading_loop():
             
             print(f"Decision: {result['decision']}")
             print(f"Reason: {result['reason']}")
-            print("Waiting 15 minutes for next cycle...")
+            print("Waiting 60 minutes for next cycle...")
             print("=" * 60)
             
-            # 15분 대기
-            time.sleep(15 * 60)
+            time.sleep(60 * 60)
             
         except KeyboardInterrupt:
             print("\n\nTrading bot stopped by user.")
