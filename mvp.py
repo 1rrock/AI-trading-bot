@@ -70,7 +70,7 @@ def get_ai_decision(summary):
         "I always secure a margin of safety before making decisions, avoid speculative approaches, and rely on rational, data-driven analysis. "
         "I do not get swayed by market bubbles or fear, and I follow principles of steady diversification and risk management. "
         "In Bitcoin investment, I apply these value investing principles, carefully considering long-term growth and intrinsic value before making buy, sell, or hold decisions. "
-        "Based on the provided chart data, tell me which option to choose: buy, sell, or hold. "
+        "Based on the provided summary data including price, volume, RSI, moving averages, fear-greed index, and latest news headlines, apply the above investment philosophy and tell me which option to choose: buy, sell, or hold. "
         "Response in json format. "
         "Response Example: "
         "{\"decision\": \"buy\", \"reason\": \"some technical reason\"} "
