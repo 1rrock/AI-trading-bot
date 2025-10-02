@@ -1,0 +1,40 @@
+# API Keys and Environment
+.env
+*.env
+
+# Trading Data (Contains Real Financial Information)
+*.json
+!config.json
+!package.json
+
+# Log Files
+*.log
+
+# Cache Files
+news_cache.json
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+.Python
+
+# IDE Files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Backup Folders (Contains Real Trading Data)
+backup/
+
+# Personal Trading Data
+trades_*.json
+ai_signals_*.json
+performance_*.json
+trading_bot_*.log
