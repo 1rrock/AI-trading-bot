@@ -331,6 +331,83 @@ def analyze_news_sentiment(headlines):
 
 
 
+def apply_contrarian_signal_reversal(ai_signals, fear_greed_data, market_indicators):
+    """극단적 시장 상황에서 AI 신호를 컨트래리안 관점으로 반전시키는 함수"""
+    
+    if not ai_signals:
+        return ai_signals
+    
+    # 극단적 공포/탐욕 상황 확인
+    fear_greed_index = fear_greed_data.get('fng_value', 50) if fear_greed_data else 50
+    
+    # 시장 지표들로 극단적 상황 판단
+    rsi_values = []
+    for coin, indicators in market_indicators.items():
+        if 'rsi' in indicators:
+            rsi_values.append(indicators['rsi'])
+    
+    avg_rsi = sum(rsi_values) / len(rsi_values) if rsi_values else 50
+    
+    # 극단적 상황 정의
+    extreme_fear = fear_greed_index <= 20  # 극심한 공포
+    extreme_greed = fear_greed_index >= 80  # 극심한 탐욕
+    extreme_oversold = avg_rsi <= 25  # 극심한 과매도
+    extreme_overbought = avg_rsi >= 75  # 극심한 과매수
+    
+    reversed_signals = {}
+    
+    for coin, signal_data in ai_signals.items():
+        original_signal = signal_data.get('signal', 'HOLD')
+        confidence = signal_data.get('confidence', 0.5)
+        reason = signal_data.get('reason', '')
+        
+        # 컨트래리안 신호 반전 로직
+        reversed_signal = original_signal
+        reversal_reason = ""
+        
+        # 극심한 공포 + 과매도 상황 → SELL 신호를 STRONG_BUY로 반전
+        if (extreme_fear or extreme_oversold) and original_signal in ['SELL', 'STRONG_SELL']:
+            reversed_signal = 'STRONG_BUY'
+            reversal_reason = f"🔄 CONTRARIAN REVERSAL: 극심한 공포/과매도 상황에서 {original_signal} → STRONG_BUY 반전"
+            confidence = min(0.9, confidence * 1.3)  # 신뢰도 상승
+            
+        # 극심한 탐욕 + 과매수 상황 → BUY 신호를 STRONG_SELL로 반전  
+        elif (extreme_greed or extreme_overbought) and original_signal in ['BUY', 'STRONG_BUY']:
+            reversed_signal = 'STRONG_SELL'
+            reversal_reason = f"🔄 CONTRARIAN REVERSAL: 극심한 탐욕/과매수 상황에서 {original_signal} → STRONG_SELL 반전"
+            confidence = min(0.9, confidence * 1.3)  # 신뢰도 상승
+            
+        # 중간 정도 극단적 상황에서는 신호 강도만 조정
+        elif extreme_fear and original_signal == 'HOLD':
+            reversed_signal = 'BUY'
+            reversal_reason = f"🔄 CONTRARIAN OPPORTUNITY: 극심한 공포 상황에서 HOLD → BUY 전환"
+            confidence = min(0.8, confidence * 1.2)
+            
+        elif extreme_greed and original_signal == 'HOLD':
+            reversed_signal = 'SELL'
+            reversal_reason = f"🔄 CONTRARIAN OPPORTUNITY: 극심한 탐욕 상황에서 HOLD → SELL 전환"
+            confidence = min(0.8, confidence * 1.2)
+        
+        # 반전된 신호 데이터 구성
+        reversed_signals[coin] = {
+            'signal': reversed_signal,
+            'confidence': confidence,
+            'reason': f"{reason}\n{reversal_reason}" if reversal_reason else reason,
+            'original_signal': original_signal,
+            'reversal_applied': bool(reversal_reason),
+            'stop_loss': signal_data.get('stop_loss', 0),
+            'take_profit': signal_data.get('take_profit', 0),
+            'recommended_size': signal_data.get('recommended_size', 0)
+        }
+        
+        # 반전 적용시 로깅
+        if reversal_reason:
+            print(f"🔄 {coin}: {original_signal} → {reversed_signal} (신뢰도: {confidence:.1%})")
+            print(f"   이유: {reversal_reason}")
+    
+    return reversed_signals
+
+
 def analyze_multi_timeframe(coin_data):
     """다중 타임프레임 종합 분석"""
     analysis = {}
@@ -502,13 +579,15 @@ def get_portfolio_ai_signals(portfolio_summary, max_retries=3):
     
     # 개선된 포트폴리오 전용 프롬프트 - 뉴스/이벤트 반영 + 리스크 관리 강화
     prompt = (
-        "You're a cryptocurrency portfolio trading AI expert managing a diversified portfolio of BTC, ETH, SOL, and XRP. "
-        "Your strategy focuses on: "
-        "1. Event-driven analysis with real-time news sentiment integration "
-        "2. Multi-timeframe technical analysis with adaptive market regime recognition "
-        "3. Enhanced momentum trading with volatility-adjusted position sizing "
-        "4. Dynamic correlation analysis and intelligent diversification "
-        "5. Explicit risk management with stop-loss and take-profit guidance "
+        "🔄 You are a CONTRARIAN cryptocurrency trading AI specialist - 'Be fearful when others are greedy, and greedy when others are fearful.' "
+        "Your strategy ACTIVELY COUNTERS mainstream sentiment and exploits extreme market emotions. "
+        "Portfolio: BTC, ETH, SOL, XRP with AGGRESSIVE 30% trades and 70% concentration limits. "
+        "CONTRARIAN CORE PRINCIPLES: "
+        "1. INVERSE MOMENTUM: Popular = Fade it | Despised = Opportunity "
+        "2. EXTREME SENTIMENT EXPLOITATION: Fear <30 = BUY | Greed >70 = SELL "
+        "3. VOLATILITY AS FUEL: High volatility = Higher positions (not smaller) "
+        "4. CROWD PSYCHOLOGY REVERSAL: When everyone panics = You accumulate "
+        "5. CONTRARIAN RISK MANAGEMENT: Wider stops, bigger rewards "
         "\n"
         "🚨 CRITICAL: Analyze news headlines for market-moving events with severity weighting: "
         "- Regulatory developments (SEC/government approvals, bans, lawsuits, legal clarity) "
@@ -525,30 +604,30 @@ def get_portfolio_ai_signals(portfolio_summary, max_retries=3):
         "- Recommended_Size: Allocation ratio based on signal confidence and volatility "
         "\n"
         f"Enhanced Guidelines: "
-        f"📊 Technical Analysis: "
-        f"- RSI < {RSI_OVERSOLD}: Strong oversold (BUY if no negative news) "
-        f"- RSI > {RSI_OVERBOUGHT}: Overbought (SELL/HOLD, reduce positions) "
-        f"- Multi-timeframe alignment: Confirm day/4hr/1hr trend direction "
-        f"- Volume validation: >150% average confirms breakouts/breakdowns "
-        f"📰 News Sentiment Integration: "
-        f"- Positive regulatory/institutional news: Increase BUY confidence +0.2 "
-        f"- Negative regulatory/security news: Increase SELL confidence +0.3 "
-        f"- Major partnerships/upgrades: Boost STRONG_BUY signals "
-        f"📈 Market Psychology: "
-        f"- Fear & Greed < {FEAR_GREED_EXTREME_FEAR}: Contrarian opportunity (if no bad news) "
-        f"- Fear & Greed > {FEAR_GREED_EXTREME_GREED}: Distribution zone (take profits) "
-        f"- High market correlation (>0.8): Reduce diversification assumptions "
-        f"⚡ Enhanced Signals: "
-        f"- EMERGENCY_SELL: Major hacks, severe regulatory crackdowns, 15%+ drops with bad news "
-        f"- STRONG_BUY: ETF approvals + oversold + volume surge + positive news confluence "
-        f"- Adapt to volatility: High vol = smaller positions but faster reactions "
+        f"� CONTRARIAN Technical Analysis: "
+        f"- RSI < {RSI_OVERSOLD}: EXTREME contrarian BUY (panic selling = opportunity) "  
+        f"- RSI > {RSI_OVERBOUGHT}: EXTREME contrarian SELL (euphoric buying = danger) "
+        f"- Strong uptrend + high volume: Look for DISTRIBUTION (SELL) "
+        f"- Strong downtrend + capitulation: Look for ACCUMULATION (BUY) "
+        f"📰 CONTRARIAN News Interpretation: "
+        f"- Extremely positive news + FOMO: Consider SELL (buy rumor, sell news) "
+        f"- Extreme FUD + panic: Consider STRONG_BUY (blood in streets) "
+        f"- Media euphoria: Distribution time | Media despair: Accumulation time "
+        f"🧠 CONTRARIAN Market Psychology: "
+        f"- Fear & Greed < {FEAR_GREED_EXTREME_FEAR}: 🔥 MAXIMUM BUY OPPORTUNITY "
+        f"- Fear & Greed > {FEAR_GREED_EXTREME_GREED}: ⚠️ MAXIMUM SELL OPPORTUNITY "
+        f"- Everyone bullish: Be bearish | Everyone bearish: Be bullish "
+        f"⚡ CONTRARIAN Signals: "
+        f"- STRONG_BUY: Market panic + extreme oversold + everyone selling "
+        f"- EMERGENCY_SELL: Market euphoria + extreme overbought + everyone buying "
+        f"- Volatility = Opportunity: High vol = Bigger positions (contrarian fuel) "
         "\n"
-        "Please provide analysis in JSON format with enhanced reasoning and risk management: "
+        "Return CONTRARIAN analysis in JSON with AGGRESSIVE positioning: "
         "{"
-        "  \"BTC\": {\"signal\": \"STRONG_BUY\", \"confidence\": 0.9, \"reason\": \"ETF inflow surge + RSI(25) oversold + bullish MA cross + institutional FOMO\", \"stop_loss\": -0.05, \"take_profit\": 0.12, \"recommended_size\": 0.25}, "
-        "  \"ETH\": {\"signal\": \"HOLD\", \"confidence\": 0.6, \"reason\": \"Neutral technicals, awaiting staking rewards clarity\", \"stop_loss\": -0.03, \"take_profit\": 0.08, \"recommended_size\": 0.25}, "
-        "  \"SOL\": {\"signal\": \"BUY\", \"confidence\": 0.8, \"reason\": \"Ecosystem growth + volume breakout + oversold bounce\", \"stop_loss\": -0.04, \"take_profit\": 0.1, \"recommended_size\": 0.3}, "
-        "  \"XRP\": {\"signal\": \"SELL\", \"confidence\": 0.7, \"reason\": \"Regulatory uncertainty + overbought RSI(75) + distribution pattern\", \"stop_loss\": -0.02, \"take_profit\": 0.07, \"recommended_size\": 0.2}"
+        "  \"BTC\": {\"signal\": \"STRONG_BUY\", \"confidence\": 0.9, \"reason\": \"CONTRARIAN: Market panic + RSI(20) extreme oversold + everyone selling = opportunity\", \"stop_loss\": -0.08, \"take_profit\": 0.15, \"recommended_size\": 0.4}, "
+        "  \"ETH\": {\"signal\": \"SELL\", \"confidence\": 0.8, \"reason\": \"CONTRARIAN: Euphoric sentiment + RSI(80) extreme overbought + FOMO peak = distribution\", \"stop_loss\": -0.05, \"take_profit\": 0.12, \"recommended_size\": 0.35}, "
+        "  \"SOL\": {\"signal\": \"STRONG_BUY\", \"confidence\": 0.85, \"reason\": \"CONTRARIAN: Extreme pessimism + oversold bounce + blood in streets\", \"stop_loss\": -0.10, \"take_profit\": 0.20, \"recommended_size\": 0.5}, "
+        "  \"XRP\": {\"signal\": \"HOLD\", \"confidence\": 0.5, \"reason\": \"CONTRARIAN: Neutral sentiment, waiting for extreme fear or greed\", \"stop_loss\": -0.05, \"take_profit\": 0.10, \"recommended_size\": 0.2}"
         "}"
     )
     
@@ -923,41 +1002,38 @@ def check_stop_loss(upbit, stop_loss_percent=STOP_LOSS_PERCENT):
     return stop_loss_executed
 
 def calculate_dynamic_position_size(market_condition, base_ratio=BASE_TRADE_RATIO):
-    """시장 상황에 따른 동적 포지션 사이징 - 강세장 기회 포착 강화"""
+    """컨트래리언 전략 기반 동적 포지션 사이징 - 역추세 매매"""
     condition = market_condition.get("condition", "sideways")
     confidence = market_condition.get("confidence", 0.5)
     avg_change = market_condition.get("avg_change", 0)
     
-    # 시장 상황별 리스크 조정 - 보수성 완화
-    risk_multiplier = 1.0
+    # 컨트래리언 승수 로드
+    risk_config = CONFIG.get("risk_management", {})
+    
+    # 시장 상황별 컨트래리언 승수 적용
+    contrarian_multiplier = 1.0
     
     if condition == "bull_market":
-        if abs(avg_change) > 15:  # 강한 상승 모멘텀
-            risk_multiplier = 1.5  # 기존 1.2 → 1.5로 증가
-            print("🚀 강력한 상승세 감지 - 공격적 포지션 증가")
-        else:
-            risk_multiplier = 1.3  # 기존 1.2 → 1.3으로 증가
+        contrarian_multiplier = risk_config.get("bull_market_multiplier", 0.8)  # 상승 시 매도 준비
+        print(f"� 강세장 감지 - 컨트래리언 매도 준비 ({contrarian_multiplier}배)")
     elif condition == "bull_market_overheated":
-        risk_multiplier = 0.8  # 기존 0.7 → 0.8로 완화 (기회 상실 방지)
-        print("🔥 과열 감지하지만 선별적 참여 유지")
+        contrarian_multiplier = risk_config.get("bull_overheated_multiplier", 0.5)  # 극도 상승 시 매도
+        print(f"🔥 과열장 감지 - 컨트래리언 강력 매도 ({contrarian_multiplier}배)")
     elif condition == "bear_market":
-        risk_multiplier = 0.6  # 약세장 유지
+        contrarian_multiplier = risk_config.get("bear_market_multiplier", 1.3)  # 하락 시 매수 기회
+        print(f"📉 약세장 감지 - 컨트래리언 매수 기회 ({contrarian_multiplier}배)")
     elif condition == "bear_market_oversold":
-        risk_multiplier = 1.0  # 기존 0.9 → 1.0으로 기회 포착 강화
-        print("💎 과매도 반등 기회 - 정상 포지션")
+        contrarian_multiplier = risk_config.get("bear_oversold_multiplier", 1.5)  # 극도 하락 시 공격적 매수
+        print(f"💎 과매도 감지 - 컨트래리언 공격적 매수 ({contrarian_multiplier}배)")
     elif condition == "high_volatility":
-        # 방향성 있는 고변동성은 참여, 무방향은 보수적
-        if abs(avg_change) > 10:
-            risk_multiplier = 0.7  # 기존 0.5 → 0.7로 완화
-            print("⚡ 방향성 있는 고변동성 - 제한적 참여")
-        else:
-            risk_multiplier = 0.5  # 무방향 고변동성은 여전히 보수적
+        contrarian_multiplier = risk_config.get("high_volatility_multiplier", 1.2)  # 변동성은 기회
+        print(f"⚡ 고변동성 감지 - 컨트래리언 기회 포착 ({contrarian_multiplier}배)")
     
-    # 신뢰도에 따른 추가 조정 - 범위 확대
-    confidence_multiplier = 0.6 + (confidence * 0.6)  # 기존 0.5~1.0 → 0.6~1.2로 확대
+    # 신뢰도에 따른 추가 조정
+    confidence_multiplier = 0.7 + (confidence * 0.6)  # 0.7~1.3 범위
     
-    adjusted_ratio = base_ratio * risk_multiplier * confidence_multiplier
-    return min(adjusted_ratio, base_ratio * 2.0)  # 기존 1.5배 → 2.0배로 상한 확대
+    adjusted_ratio = base_ratio * contrarian_multiplier * confidence_multiplier
+    return min(adjusted_ratio, base_ratio * 2.0)  # 최대 2배 제한
 
 def calculate_performance_metrics(upbit, portfolio_summary):
     """포트폴리오 성과 지표 계산"""
@@ -1024,12 +1100,13 @@ def check_performance_alerts(performance):
     elif krw_pct < 10:
         alerts.append("🚨 현금 비중이 10% 미만입니다. 리밸런싱이 필요할 수 있습니다.")
     
-    # 포트폴리오 집중도 체크
+    # 포트폴리오 집중도 체크 (컨트래리언 설정 반영)
+    max_single_ratio = CONFIG.get("trading_constraints", {}).get("max_single_coin_ratio", 0.35) * 100
     for coin, data in performance['coin_values'].items():
-        if data['percentage'] > 45:
-            alerts.append(f"⚠️ {coin} 비중 위험: {data['percentage']:.1f}% (45% 초과)")
-        elif data['percentage'] > 35:
-            alerts.append(f"🔶 {coin} 비중 주의: {data['percentage']:.1f}% (35% 초과)")
+        if data['percentage'] > max_single_ratio + 10:  # 설정 + 10% (위험)
+            alerts.append(f"⚠️ {coin} 비중 위험: {data['percentage']:.1f}% ({max_single_ratio + 10:.0f}% 초과)")
+        elif data['percentage'] > max_single_ratio:  # 설정 비율 초과 (주의)
+            alerts.append(f"🔶 {coin} 비중 주의: {data['percentage']:.1f}% ({max_single_ratio:.0f}% 초과)")
     
     # 총 자산 체크
     total_value = performance['total_value']
@@ -1099,16 +1176,36 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
         print(f"  신호: {signal} | 신뢰도: {confidence:.1%}")
         print(f"  근거: {reason}")
         
+        # 컨트래리안 반전 정보 표시
+        if signal_data.get('reversal_applied', False):
+            original_signal = signal_data.get('original_signal', 'UNKNOWN')
+            print(f"  🔄 컨트래리안 반전: {original_signal} → {signal}")
+            print(f"  💡 컨트래리안 논리: 극단적 시장 상황 활용")
+        
         try:
             if signal in ['STRONG_BUY', 'BUY']:
-                # 신뢰도에 따른 매수 금액 조절 (리스크 감소)
-                if signal == 'STRONG_BUY' and confidence > 0.9:
-                    multiplier = 1.5  # 1.5배 매수 (기존 2배에서 감소)
-                elif signal == 'BUY' and confidence > 0.7:
-                    multiplier = 1.0  # 일반 매수
-                elif confidence > 0.5:
-                    multiplier = 0.5  # 신뢰도 낮을 때 절반
-                else:
+                # 컨트래리안 매수 금액 조절 (공격적 공포 활용)
+                is_contrarian_reversal = signal_data.get('reversal_applied', False)
+                
+                if signal == 'STRONG_BUY':
+                    if is_contrarian_reversal and confidence > 0.8:
+                        multiplier = 2.0  # 컨트래리안 반전 시 더 공격적
+                        print(f"  🚀 컨트래리안 강화 매수: 극단적 공포/과매도 상황 활용")
+                    elif confidence > 0.9:
+                        multiplier = 1.5  # 일반 강한 매수
+                    else:
+                        multiplier = 1.2  # 보통 강한 매수
+                elif signal == 'BUY':
+                    if is_contrarian_reversal and confidence > 0.7:
+                        multiplier = 1.3  # 컨트래리안 반전 시 증폭
+                        print(f"  📈 컨트래리안 기회 매수: 시장 공포 활용")  
+                    elif confidence > 0.7:
+                        multiplier = 1.0  # 일반 매수
+                    else:
+                        multiplier = 0.7  # 보수적 매수
+                
+                # 신뢰도가 너무 낮으면 패스
+                if confidence < 0.5:
                     print(f"  ⚠️ 신뢰도 너무 낮음 ({confidence:.1%}) - 매수 건너뜀")
                     continue
                 
@@ -1153,8 +1250,8 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 free_trading_mode = CONFIG.get("trading_mode", {}).get("free_investment", False)
                 
                 if not free_trading_mode:
-                    # 기존 집중도 제한 (보수적 모드)
-                    max_concentration = CONFIG.get("trading_constraints", {}).get("max_single_coin_ratio", 0.35)
+                    # 컨트래리언 집중도 제한 (공격적 모드)
+                    max_concentration = CONFIG.get("trading_constraints", {}).get("max_single_coin_ratio", 0.70)
                     
                     if current_coin_ratio >= max_concentration:
                         print(f"  ⚠️ {coin} 비중 한계 도달 ({current_coin_ratio:.1%} >= {max_concentration:.1%}) - 매수 제한")
@@ -1233,7 +1330,7 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 else:
                     print(f"  ⏸️  매수 금액 부족 ({trade_amount:,.0f}원 < {MIN_TRADE_AMOUNT:,}원)")
                     
-            elif signal == 'SELL':
+            elif signal in ['SELL', 'STRONG_SELL']:
                 # 거래 전 포트폴리오 스냅샷
                 portfolio_before = {}
                 try:
@@ -1249,8 +1346,26 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 # 매도 실행
                 current_balance = upbit.get_balance(ticker)
                 if current_balance > 0:
-                    # 신뢰도에 따른 매도 비율
-                    sell_ratio = confidence if confidence > 0.6 else 0.3
+                    # 컨트래리안 매도 비율 조절
+                    is_contrarian_reversal = signal_data.get('reversal_applied', False)
+                    
+                    if signal == 'STRONG_SELL':
+                        if is_contrarian_reversal and confidence > 0.8:
+                            sell_ratio = 0.9  # 컨트래리안 반전 시 더 공격적 매도 (극심한 탐욕 상황)
+                            print(f"  🔥 컨트래리안 강화 매도: 극단적 탐욕/과매수 상황 활용")
+                        elif confidence > 0.8:
+                            sell_ratio = 0.8  # 일반 강한 매도
+                        else:
+                            sell_ratio = 0.6  # 보통 매도
+                    elif signal == 'SELL':
+                        if is_contrarian_reversal and confidence > 0.7:
+                            sell_ratio = 0.7  # 컨트래리안 반전 시 증폭
+                            print(f"  📉 컨트래리안 기회 매도: 시장 탐욕 활용")
+                        elif confidence > 0.6:
+                            sell_ratio = 0.5  # 일반 매도
+                        else:
+                            sell_ratio = 0.3  # 보수적 매도
+                    
                     sell_amount = current_balance * sell_ratio
                     
                     # 최소 거래 금액 확인
@@ -1626,7 +1741,15 @@ def run_trading_bot():
             
             # 4. AI 분석 실행
             print("\n🤖 AI 포트폴리오 분석 중...")
-            ai_signals = get_portfolio_ai_signals(portfolio_summary)
+            original_ai_signals = get_portfolio_ai_signals(portfolio_summary)
+            
+            # 4-1. 컨트래리안 신호 반전 적용
+            print("\n🔄 컨트래리안 신호 반전 검사 중...")
+            ai_signals = apply_contrarian_signal_reversal(
+                original_ai_signals, 
+                fng, 
+                {coin: data for coin, data in portfolio_summary.get('coins', {}).items()}
+            )
             
             # 5. 포트폴리오 현황 출력
             print(f"\n💼 현재 포트폴리오 상황:")
