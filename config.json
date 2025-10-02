@@ -2,52 +2,52 @@
   "_description": "AI 트레이딩 봇 설정 파일 - GPT-4o-mini 기반 업비트 자동매매",
   
   "trading": {
-    "_description": "거래 관련 기본 설정",
-    "base_trade_ratio": 0.15,
-    "base_trade_ratio_desc": "기본 거래 비율 (15% = 포트폴리오 대비 거래 크기)",
-    "stop_loss_percent": 15,
-    "stop_loss_percent_desc": "손절매 기준 (15% 손실 시 자동 매도)",
-    "min_trade_amount": 5000,
-    "min_trade_amount_desc": "최소 거래 금액 (5000원 미만 거래 방지)",
-    "max_position_multiplier": 1.5,
-    "max_position_multiplier_desc": "최대 포지션 배수 (고신뢰도 시 1.5배 매수)"
+    "_description": "컨트래리언 거래 설정 - 공격적 역추세 전략",
+    "base_trade_ratio": 0.30,
+    "base_trade_ratio_desc": "컨트래리언 거래 비율 (30% = 더 공격적 포지션)",
+    "stop_loss_percent": 20,
+    "stop_loss_percent_desc": "컨트래리언 손절매 (20% = 더 큰 손실 허용)",
+    "min_trade_amount": 3000,
+    "min_trade_amount_desc": "최소 거래 금액 (3000원 = 더 작은 단위)",
+    "max_position_multiplier": 2.0,
+    "max_position_multiplier_desc": "컨트래리언 최대 배수 (2.0배 = 매우 공격적)"
   },
   
   "technical_analysis": {
-    "_description": "기술적 분석 지표 설정",
-    "rsi_oversold": 30,
-    "rsi_oversold_desc": "RSI 과매도 기준 (30 이하 시 매수 시그널)",
-    "rsi_overbought": 70,
-    "rsi_overbought_desc": "RSI 과매수 기준 (70 이상 시 매도 시그널)",
-    "data_period_days": 30,
-    "data_period_days_desc": "분석용 데이터 수집 기간 (30일치 차트 데이터)"
+    "_description": "컨트래리언 기술적 분석 - 역추세 전략",
+    "rsi_oversold": 25,
+    "rsi_oversold_desc": "컨트래리언 과매도 (25 = 더 극단적 조건에서 매수)",
+    "rsi_overbought": 75,
+    "rsi_overbought_desc": "컨트래리언 과매수 (75 = 더 극단적 조건에서 매도)",
+    "data_period_days": 20,
+    "data_period_days_desc": "컨트래리언 데이터 기간 (20일 = 더 빠른 반응)"
   },
   
   "market_conditions": {
-    "_description": "시장 상황 감지 기준",
-    "bull_market_threshold": 10,
-    "bull_market_threshold_desc": "강세장 기준 (10% 이상 상승 시)",
-    "bear_market_threshold": -10,
-    "bear_market_threshold_desc": "약세장 기준 (10% 이상 하락 시)",
-    "high_volatility_threshold": 5,
-    "high_volatility_threshold_desc": "고변동성 기준 (5% 이상 변동)",
-    "fear_greed_extreme_fear": 25,
-    "fear_greed_extreme_fear_desc": "극단적 공포 기준 (공포탐욕지수 25 이하)",
-    "fear_greed_extreme_greed": 75,
-    "fear_greed_extreme_greed_desc": "극단적 탐욕 기준 (공포탐욕지수 75 이상)"
+    "_description": "컨트래리언 시장 감지 - 역추세 기준",
+    "bull_market_threshold": 8,
+    "bull_market_threshold_desc": "컨트래리언 강세장 (8% = 더 빠른 감지)",
+    "bear_market_threshold": -8,
+    "bear_market_threshold_desc": "컨트래리언 약세장 (-8% = 더 빠른 감지)",
+    "high_volatility_threshold": 4,
+    "high_volatility_threshold_desc": "컨트래리언 고변동성 (4% = 더 민감)",
+    "fear_greed_extreme_fear": 30,
+    "fear_greed_extreme_fear_desc": "컨트래리언 극공포 (30 = 덜 극단적, 기회 포착)",
+    "fear_greed_extreme_greed": 70,
+    "fear_greed_extreme_greed_desc": "컨트래리언 극탐욕 (70 = 덜 극단적, 위험 신호)"
   },
   
   "risk_management": {
-    "_description": "리스크 관리 승수 설정",
-    "bull_market_multiplier": 1.2,
-    "bull_market_multiplier_desc": "강세장 거래량 증가 (1.2배)",
-    "bull_overheated_multiplier": 0.7,
-    "bull_overheated_multiplier_desc": "강세장 과열 시 거래량 감소 (0.7배)",
-    "bear_market_multiplier": 0.6,
-    "bear_market_multiplier_desc": "약세장 거래량 감소 (0.6배)",
-    "bear_oversold_multiplier": 0.9,
-    "bear_oversold_multiplier_desc": "약세장 과매도 시 거래량 조정 (0.9배)",
-    "high_volatility_multiplier": 0.5,
+    "_description": "컨트래리언 리스크 관리 - 역추세 승수",
+    "bull_market_multiplier": 0.8,
+    "bull_market_multiplier_desc": "컨트래리언 강세장 (0.8배 = 상승 시 매도 준비)",
+    "bull_overheated_multiplier": 0.5,
+    "bull_overheated_multiplier_desc": "컨트래리언 과열 (0.5배 = 극도 상승 시 매도)",
+    "bear_market_multiplier": 1.3,
+    "bear_market_multiplier_desc": "컨트래리언 약세장 (1.3배 = 하락 시 매수 기회)",
+    "bear_oversold_multiplier": 1.5,
+    "bear_oversold_multiplier_desc": "컨트래리언 과매도 (1.5배 = 극도 하락 시 공격적 매수)",
+    "high_volatility_multiplier": 1.2,
     "high_volatility_multiplier_desc": "고변동성 시 거래량 대폭 감소 (0.5배)"
   },
   
@@ -78,11 +78,13 @@
   },
   
   "backtest": {
-    "_description": "백테스트 관련 설정",
+    "_description": "컨트래리언 실제 투자 설정",
+    "enabled": false,
+    "enabled_desc": "백테스팅 모드 비활성화 (false=실제투자)",
     "default_days": 90,
     "default_days_desc": "기본 백테스트 기간 (90일)",
     "initial_balance": 1000000,
-    "initial_balance_desc": "백테스트 초기 자본금 (100만원)"
+    "initial_balance_desc": "가상 초기 자금 (100만원)"
   },
   
   "cache": {
@@ -94,27 +96,26 @@
   },
   
   "safety": {
-    "_description": "안전장치 설정 (자동 리밸런싱)",
-    "min_cash_ratio": 0.15,
-    "min_cash_ratio_desc": "최소 현금 비율 (15% 미만 시 자동 매도)",
-    "max_portfolio_concentration": 0.40,
-    "max_portfolio_concentration_desc": "최대 포트폴리오 집중도 (40% 초과 시 자동 매도)"
-  },
+    "_description": "컨트래리언 안전장치 - 공격적 설정",
+    "min_cash_ratio": 0.05,
+    "min_cash_ratio_desc": "컨트래리언 최소 현금 (5% = 공격적 투자)",
+    "max_portfolio_concentration": 0.70,
+    "max_portfolio_concentration_desc": "컨트래리언 최대 집중도 (70% = 집중투자 허용)",
   
   "trading_constraints": {
-    "_description": "과매매 방지 제약 조건 - 빈번한 체크에 대응한 강화된 제약",
-    "min_interval_minutes": 90,
-    "min_interval_minutes_desc": "최소 거래 간격 (1.5시간 - 체크 단축 보상)",
-    "max_trades_per_day": 10,
-    "max_trades_per_day_desc": "일일 최대 거래 횟수 (체크 증가 대응)",
-    "price_change_threshold": 3.0,
-    "price_change_threshold_desc": "최소 가격 변동 기준 (3% 이상 시만 거래 - 노이즈 필터링)",
-    "ai_confidence_minimum": 0.78,
-    "ai_confidence_minimum_desc": "AI 신뢰도 최소 기준 (78% 이상 시만 실행 - 정밀도 향상)",
-    "sideways_detection_threshold": 2.0,
-    "sideways_detection_threshold_desc": "횡보장 감지 기준 (2% 이하 변동시 거래 제한)",
-    "max_single_coin_ratio": 0.35,
-    "max_single_coin_ratio_desc": "단일 코인 최대 비중 (35% 초과 시 매수 제한)"
+    "_description": "컨트래리언 거래 제약 - 공격적 설정",
+    "min_interval_minutes": 30,
+    "min_interval_minutes_desc": "컨트래리언 거래 간격 (30분 = 더 빈번)",
+    "max_trades_per_day": 20,
+    "max_trades_per_day_desc": "컨트래리언 일일 거래 (20회 = 더 활발)",
+    "price_change_threshold": 2.0,
+    "price_change_threshold_desc": "컨트래리언 가격 변동 (2% = 더 민감)",
+    "ai_confidence_minimum": 0.40,
+    "ai_confidence_minimum_desc": "컨트래리언 AI 신뢰도 (40% = 더 관대)",
+    "sideways_detection_threshold": 1.5,
+    "sideways_detection_threshold_desc": "컨트래리언 횡보 감지 (1.5% = 더 민감)",
+    "max_single_coin_ratio": 0.70,
+    "max_single_coin_ratio_desc": "컨트래리언 단일 코인 (70% = 집중투자 허용)"
   },
   
   "check_intervals": {
