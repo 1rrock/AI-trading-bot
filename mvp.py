@@ -1149,12 +1149,25 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 current_coin_value = current_coin_balance * current_price if current_coin_balance > 0 else 0
                 current_coin_ratio = current_coin_value / current_total_value if current_total_value > 0 else 0
                 
-                # config에서 설정한 집중도 제한 확인 (기본값 35%)
-                max_concentration = 0.35  # 35% 제한 (설정값)
+                # 자유 투자 모드 설정 체크
+                free_trading_mode = CONFIG.get("trading_mode", {}).get("free_investment", False)
                 
-                if current_coin_ratio >= max_concentration:
-                    print(f"  ⚠️ {coin} 비중 한계 도달 ({current_coin_ratio:.1%} >= {max_concentration:.1%}) - 매수 제한")
-                    continue
+                if not free_trading_mode:
+                    # 기존 집중도 제한 (보수적 모드)
+                    max_concentration = CONFIG.get("trading_constraints", {}).get("max_single_coin_ratio", 0.35)
+                    
+                    if current_coin_ratio >= max_concentration:
+                        print(f"  ⚠️ {coin} 비중 한계 도달 ({current_coin_ratio:.1%} >= {max_concentration:.1%}) - 매수 제한")
+                        continue
+                else:
+                    # 자유 투자 모드: 집중도 제한 완화 (최대 70%까지 허용)
+                    max_concentration = CONFIG.get("trading_mode", {}).get("max_concentration_free", 0.70)
+                    
+                    if current_coin_ratio >= max_concentration:
+                        print(f"  ⚠️ {coin} 극한 비중 도달 ({current_coin_ratio:.1%} >= {max_concentration:.1%}) - 매수 제한")
+                        continue
+                    else:
+                        print(f"  🚀 자유투자모드: {coin} 현재비중 {current_coin_ratio:.1%} (한계: {max_concentration:.1%})")
                 
                 # 매수 실행 (동적 포지션 사이징 + AI 추천 사이즈 적용)
                 ai_size_ratio = signal_data.get('recommended_size', dynamic_ratio)
