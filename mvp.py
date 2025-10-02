@@ -1469,31 +1469,31 @@ def calculate_check_interval(portfolio_summary, news_analysis=None):
         coin_count += 1
     
     if coin_count == 0:
-        return CHECK_INTERVALS["default_interval"] * 60  # 기본 간격 (분 → 초)
+        return CHECK_INTERVALS["default_interval"] * 60  # 컨트래리언 기본 간격 30분 (분 → 초)
     
     avg_volatility = total_volatility / coin_count
     
-    # 뉴스 긴급도 우선 체크
+    # 뉴스 긴급도 우선 체크 (컨트래리언 극초고속 반응)
     if news_analysis and news_analysis.get('emergency', False):
-        interval_min = CHECK_INTERVALS.get("news_emergency_interval", 5)
+        interval_min = CHECK_INTERVALS.get("news_emergency_interval", 3)  # 컨트래리언 3분
         print(f"🚨 긴급 뉴스 감지 → {interval_min}분 후 재체크")
         return interval_min * 60
     
-    # config에서 설정한 변동성 기준과 간격 사용 (더 공격적으로 조정됨)
+    # config에서 설정한 변동성 기준과 간격 사용 (컨트래리언 공격적 설정)
     if avg_volatility > CHECK_INTERVALS["extreme_volatility_threshold"]:      # 극고변동성
-        interval_min = CHECK_INTERVALS["extreme_volatility_interval"]  # 10분
+        interval_min = CHECK_INTERVALS["extreme_volatility_interval"]  # 5분 (컨트래리언)
         print(f"🔥 극고변동성 감지 ({avg_volatility:.1f}%) → {interval_min}분 후 재체크")
         return interval_min * 60           # 분 → 초
     elif avg_volatility > CHECK_INTERVALS["high_volatility_threshold"]:       # 고변동성
-        interval_min = CHECK_INTERVALS["high_volatility_interval"]  # 25분
+        interval_min = CHECK_INTERVALS["high_volatility_interval"]  # 10분 (컨트래리언)
         print(f"📈 고변동성 감지 ({avg_volatility:.1f}%) → {interval_min}분 후 재체크")
         return interval_min * 60              # 분 → 초
     elif avg_volatility > CHECK_INTERVALS["medium_volatility_threshold"]:     # 중변동성  
-        interval_min = CHECK_INTERVALS["medium_volatility_interval"]  # 45분
+        interval_min = CHECK_INTERVALS["medium_volatility_interval"]  # 20분 (컨트래리언)
         print(f"📊 중변동성 감지 ({avg_volatility:.1f}%) → {interval_min}분 후 재체크")
         return interval_min * 60            # 분 → 초
     else:                                                                    # 저변동성
-        interval_min = CHECK_INTERVALS["low_volatility_interval"]  # 90분
+        interval_min = CHECK_INTERVALS["low_volatility_interval"]  # 40분 (컨트래리언)
         print(f"😴 저변동성 감지 ({avg_volatility:.1f}%) → {interval_min}분 후 재체크")
         return interval_min * 60               # 분 → 초
 

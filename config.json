@@ -100,7 +100,8 @@
     "min_cash_ratio": 0.05,
     "min_cash_ratio_desc": "컨트래리언 최소 현금 (5% = 공격적 투자)",
     "max_portfolio_concentration": 0.70,
-    "max_portfolio_concentration_desc": "컨트래리언 최대 집중도 (70% = 집중투자 허용)",
+    "max_portfolio_concentration_desc": "컨트래리언 최대 집중도 (70% = 집중투자 허용)"
+  },
   
   "trading_constraints": {
     "_description": "컨트래리언 거래 제약 - 공격적 설정",
@@ -119,24 +120,24 @@
   },
   
   "check_intervals": {
-    "_description": "변동성별 체크 주기 설정 (분 단위) - 기회포착과 과매매방지 균형",
-    "extreme_volatility_threshold": 8.0,
-    "extreme_volatility_threshold_desc": "극고변동성 기준 (8% 이상)",
-    "extreme_volatility_interval": 15,
-    "extreme_volatility_interval_desc": "극고변동성 시 체크 주기 (15분 - 최대 기회 포착)",
-    "high_volatility_threshold": 5.0,
-    "high_volatility_threshold_desc": "고변동성 기준 (5% 이상)",
-    "high_volatility_interval": 25,
-    "high_volatility_interval_desc": "고변동성 시 체크 주기 (25분)",
-    "medium_volatility_threshold": 3.0,
-    "medium_volatility_threshold_desc": "중변동성 기준 (3% 이상)",
-    "medium_volatility_interval": 45,
-    "medium_volatility_interval_desc": "중변동성 시 체크 주기 (45분)",
-    "low_volatility_interval": 75,
-    "low_volatility_interval_desc": "저변동성 시 체크 주기 (1시간 15분)",
-    "default_interval": 60,
-    "default_interval_desc": "기본 체크 주기 (1시간 - 균형점)",
-    "news_emergency_interval": 10,
-    "news_emergency_interval_desc": "긴급 뉴스 시 체크 주기 (10분 - 초고속 대응)"
+    "_description": "컨트래리언 체크 주기 - 빠른 기회 포착과 역추세 대응",
+    "extreme_volatility_threshold": 6.0,
+    "extreme_volatility_threshold_desc": "컨트래리언 극변동성 (6% = 더 민감)",
+    "extreme_volatility_interval": 5,
+    "extreme_volatility_interval_desc": "컨트래리언 극변동성 체크 (5분 = 초고속 반응)",
+    "high_volatility_threshold": 4.0,
+    "high_volatility_threshold_desc": "컨트래리언 고변동성 (4% = 더 민감)",
+    "high_volatility_interval": 10,
+    "high_volatility_interval_desc": "컨트래리언 고변동성 체크 (10분 = 빠른 대응)",
+    "medium_volatility_threshold": 2.5,
+    "medium_volatility_threshold_desc": "컨트래리언 중변동성 (2.5% = 더 민감)",
+    "medium_volatility_interval": 20,
+    "medium_volatility_interval_desc": "컨트래리언 중변동성 체크 (20분)",
+    "low_volatility_interval": 40,
+    "low_volatility_interval_desc": "컨트래리언 저변동성 체크 (40분)",
+    "default_interval": 30,
+    "default_interval_desc": "컨트래리언 기본 체크 (30분 = 공격적 모니터링)",
+    "news_emergency_interval": 3,
+    "news_emergency_interval_desc": "컨트래리언 긴급 뉴스 (3분 = 극초고속 반응)"
   }
 }
