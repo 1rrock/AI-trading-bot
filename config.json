@@ -29,8 +29,8 @@
     "bull_market_threshold_desc": "강세장 기준 (10% 이상 상승 시)",
     "bear_market_threshold": -10,
     "bear_market_threshold_desc": "약세장 기준 (10% 이상 하락 시)",
-    "high_volatility_threshold": 5,
-    "high_volatility_threshold_desc": "고변동성 기준 (5% 이상 변동)",
+    "high_volatility_threshold": 8,
+    "high_volatility_threshold_desc": "고변동성 기준 (8% 이상 변동)",
     "fear_greed_extreme_fear": 25,
     "fear_greed_extreme_fear_desc": "극단적 공포 기준 (공포탐욕지수 25 이하)",
     "fear_greed_extreme_greed": 75,
@@ -98,7 +98,9 @@
     "min_cash_ratio": 0.15,
     "min_cash_ratio_desc": "최소 현금 비율 (15% 미만 시 자동 매도)",
     "max_portfolio_concentration": 0.40,
-    "max_portfolio_concentration_desc": "최대 포트폴리오 집중도 (40% 초과 시 자동 매도)"
+    "max_portfolio_concentration_desc": "최대 포트폴리오 집중도 (40% 초과 시 자동 매도)",
+    "rebalancing_deviation_threshold": 0.15,
+    "rebalancing_deviation_threshold_desc": "리밸런싱 편차 기준 (목표 대비 15% 이상 차이 시 리밸런싱)"
   },
   
   "trading_constraints": {
@@ -109,8 +111,8 @@
     "max_trades_per_day_desc": "일일 최대 거래 횟수 (체크 증가 대응)",
     "price_change_threshold": 3.0,
     "price_change_threshold_desc": "최소 가격 변동 기준 (3% 이상 시만 거래 - 노이즈 필터링)",
-    "ai_confidence_minimum": 0.78,
-    "ai_confidence_minimum_desc": "AI 신뢰도 최소 기준 (78% 이상 시만 실행 - 정밀도 향상)",
+    "ai_confidence_minimum": 0.70,
+    "ai_confidence_minimum_desc": "AI 신뢰도 최소 기준 (70% 이상 시만 실행 - 정밀도 향상)",
     "sideways_detection_threshold": 2.0,
     "sideways_detection_threshold_desc": "횡보장 감지 기준 (2% 이하 변동시 거래 제한)",
     "max_single_coin_ratio": 0.35,
@@ -123,8 +125,8 @@
     "extreme_volatility_threshold_desc": "극고변동성 기준 (8% 이상)",
     "extreme_volatility_interval": 15,
     "extreme_volatility_interval_desc": "극고변동성 시 체크 주기 (15분 - 최대 기회 포착)",
-    "high_volatility_threshold": 5.0,
-    "high_volatility_threshold_desc": "고변동성 기준 (5% 이상)",
+    "high_volatility_threshold": 8.0,
+    "high_volatility_threshold_desc": "고변동성 기준 (8% 이상)",
     "high_volatility_interval": 25,
     "high_volatility_interval_desc": "고변동성 시 체크 주기 (25분)",
     "medium_volatility_threshold": 3.0,

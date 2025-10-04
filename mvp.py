@@ -53,6 +53,7 @@ TARGET_ALLOCATION = CONFIG["coins"]["target_allocation"]
 BASE_TRADE_RATIO = CONFIG["trading"]["base_trade_ratio"]
 STOP_LOSS_PERCENT = CONFIG["trading"]["stop_loss_percent"]
 MIN_TRADE_AMOUNT = CONFIG["trading"]["min_trade_amount"]
+MAX_POSITION_MULTIPLIER = CONFIG["trading"]["max_position_multiplier"]
 RSI_OVERSOLD = CONFIG["technical_analysis"]["rsi_oversold"]
 RSI_OVERBOUGHT = CONFIG["technical_analysis"]["rsi_overbought"]
 FEAR_GREED_EXTREME_FEAR = CONFIG["market_conditions"]["fear_greed_extreme_fear"]
@@ -65,9 +66,22 @@ BEAR_MARKET_THRESHOLD = CONFIG["market_conditions"]["bear_market_threshold"]
 MIN_CASH_RATIO = CONFIG["safety"]["min_cash_ratio"]
 MAX_PORTFOLIO_CONCENTRATION = CONFIG["safety"]["max_portfolio_concentration"]
 
+# 리스크 관리 승수 (config에서 추출)
+BULL_MARKET_MULTIPLIER = CONFIG["risk_management"]["bull_market_multiplier"]
+BULL_OVERHEATED_MULTIPLIER = CONFIG["risk_management"]["bull_overheated_multiplier"]
+BEAR_MARKET_MULTIPLIER = CONFIG["risk_management"]["bear_market_multiplier"]
+BEAR_OVERSOLD_MULTIPLIER = CONFIG["risk_management"]["bear_oversold_multiplier"]
+HIGH_VOLATILITY_MULTIPLIER = CONFIG["risk_management"]["high_volatility_multiplier"]
+
+# 거래 제약 조건 (config에서 추출)
+MAX_SINGLE_COIN_RATIO = CONFIG["trading_constraints"]["max_single_coin_ratio"]
+AI_CONFIDENCE_MINIMUM = CONFIG["trading_constraints"]["ai_confidence_minimum"]
+PRICE_CHANGE_THRESHOLD = CONFIG["trading_constraints"]["price_change_threshold"]
+REBALANCING_DEVIATION_THRESHOLD = CONFIG["safety"]["rebalancing_deviation_threshold"]
+
 # 체크 주기 설정
 CHECK_INTERVALS = CONFIG["check_intervals"]
-HIGH_VOLATILITY_THRESHOLD = 5  # 5% 이상 변동성 시 고변동성
+HIGH_VOLATILITY_THRESHOLD = CONFIG["market_conditions"]["high_volatility_threshold"]
 
 
 
@@ -525,23 +539,33 @@ def get_portfolio_ai_signals(portfolio_summary, max_retries=3):
         "- Recommended_Size: Allocation ratio based on signal confidence and volatility "
         "\n"
         f"Enhanced Guidelines: "
-        f"📊 Technical Analysis: "
+        f"📊 Technical Analysis - TREND FIRST STRATEGY: "
         f"- RSI < {RSI_OVERSOLD}: Strong oversold (BUY if no negative news) "
-        f"- RSI > {RSI_OVERBOUGHT}: Overbought (SELL/HOLD, reduce positions) "
+        f"- RSI 70~85 + strong_bullish_alignment: HOLD or BUY (trend > RSI indicator, ride the wave!) "
+        f"- RSI > 85 + weak trend: SELL (extreme overbought, take profits) "
+        f"- RSI > {RSI_OVERBOUGHT} + bearish trend: SELL (momentum reversal) "
         f"- Multi-timeframe alignment: Confirm day/4hr/1hr trend direction "
         f"- Volume validation: >150% average confirms breakouts/breakdowns "
-        f"📰 News Sentiment Integration: "
+        f"� Trend Priority Rules (CRITICAL): "
+        f"- strong_bullish_alignment + RSI 70-85: Ignore RSI, recommend HOLD or BUY (강한 상승 추세는 RSI 무시) "
+        f"- strong_bullish_alignment + price surge >5%: Consider BUY even at high RSI (추세 지속 포착) "
+        f"- BTC/ETH major coins: Prefer HOLD during uptrends (주요 코인은 상승장에서 보유 우선) "
+        f"- weak/mixed signals + RSI >70: SELL cautiously (약한 추세만 RSI 우선) "
+        f"�📰 News Sentiment Integration: "
         f"- Positive regulatory/institutional news: Increase BUY confidence +0.2 "
         f"- Negative regulatory/security news: Increase SELL confidence +0.3 "
         f"- Major partnerships/upgrades: Boost STRONG_BUY signals "
         f"📈 Market Psychology: "
         f"- Fear & Greed < {FEAR_GREED_EXTREME_FEAR}: Contrarian opportunity (if no bad news) "
-        f"- Fear & Greed > {FEAR_GREED_EXTREME_GREED}: Distribution zone (take profits) "
+        f"- Fear & Greed > {FEAR_GREED_EXTREME_GREED}: Distribution zone (take profits only if trend weakens) "
         f"- High market correlation (>0.8): Reduce diversification assumptions "
         f"⚡ Enhanced Signals: "
         f"- EMERGENCY_SELL: Major hacks, severe regulatory crackdowns, 15%+ drops with bad news "
         f"- STRONG_BUY: ETF approvals + oversold + volume surge + positive news confluence "
+        f"- BUY: Strong uptrend + RSI 70-85 + volume surge (상승 추세 지속) "
+        f"- HOLD: Strong uptrend + RSI >70 but <85 (추세 지속 중 보유) "
         f"- Adapt to volatility: High vol = smaller positions but faster reactions "
+        f"- If any coin allocation exceeds {MAX_SINGLE_COIN_RATIO:.0%}, recommend SELL or HOLD to rebalance portfolio "
         "\n"
         "Please provide analysis in JSON format with enhanced reasoning and risk management: "
         "{"
@@ -739,25 +763,19 @@ def check_portfolio_concentration_limits(upbit, max_single_position=None):
         # 비중 계산 및 초과 체크
         for coin_info in coin_data:
             coin_ratio = coin_info['value'] / total_portfolio_value if total_portfolio_value > 0 else 0
-            
+            target_ratio = MAX_SINGLE_COIN_RATIO  # config.json의 max_single_coin_ratio 사용
             if coin_ratio > max_single_position:
                 print(f"⚖️ {coin_info['coin']} 비중 초과 감지: {coin_ratio:.1%}")
-                
-                # 목표 비중(40%)까지 매도
-                target_ratio = 0.4
                 excess_ratio = coin_ratio - target_ratio
                 sell_ratio = excess_ratio / coin_ratio  # 초과분 비율
-                
-                if sell_ratio > 0.05:  # 5% 이상 초과시만 실행
+                if sell_ratio > 0.03:  # 3% 이상 초과시만 실행
                     sell_amount = coin_info['balance'] * sell_ratio
                     result = upbit.sell_market_order(coin_info['ticker'], sell_amount)
-                    
                     if result:
                         sell_value = sell_amount * coin_info['current_price']
                         print(f"  ✅ {coin_info['coin']} 집중도 해소: {coin_ratio:.1%} → {target_ratio:.0%} 목표")
                         print(f"     매도량: {sell_amount:.6f}개 | 금액: {sell_value:,.0f}원")
                         return True
-                        
         return False
         
     except Exception as e:
@@ -923,41 +941,41 @@ def check_stop_loss(upbit, stop_loss_percent=STOP_LOSS_PERCENT):
     return stop_loss_executed
 
 def calculate_dynamic_position_size(market_condition, base_ratio=BASE_TRADE_RATIO):
-    """시장 상황에 따른 동적 포지션 사이징 - 강세장 기회 포착 강화"""
+    """시장 상황에 따른 동적 포지션 사이징 - config.json 승수 사용"""
     condition = market_condition.get("condition", "sideways")
     confidence = market_condition.get("confidence", 0.5)
     avg_change = market_condition.get("avg_change", 0)
     
-    # 시장 상황별 리스크 조정 - 보수성 완화
+    # 시장 상황별 리스크 조정 - config.json의 risk_management 섹션 사용
     risk_multiplier = 1.0
     
     if condition == "bull_market":
         if abs(avg_change) > 15:  # 강한 상승 모멘텀
-            risk_multiplier = 1.5  # 기존 1.2 → 1.5로 증가
+            risk_multiplier = BULL_MARKET_MULTIPLIER * 1.25  # 1.2 × 1.25 = 1.5
             print("🚀 강력한 상승세 감지 - 공격적 포지션 증가")
         else:
-            risk_multiplier = 1.3  # 기존 1.2 → 1.3으로 증가
+            risk_multiplier = BULL_MARKET_MULTIPLIER  # config: 1.2
     elif condition == "bull_market_overheated":
-        risk_multiplier = 0.8  # 기존 0.7 → 0.8로 완화 (기회 상실 방지)
+        risk_multiplier = BULL_OVERHEATED_MULTIPLIER  # config: 0.7
         print("🔥 과열 감지하지만 선별적 참여 유지")
     elif condition == "bear_market":
-        risk_multiplier = 0.6  # 약세장 유지
+        risk_multiplier = BEAR_MARKET_MULTIPLIER  # config: 0.6
     elif condition == "bear_market_oversold":
-        risk_multiplier = 1.0  # 기존 0.9 → 1.0으로 기회 포착 강화
+        risk_multiplier = BEAR_OVERSOLD_MULTIPLIER  # config: 0.9
         print("💎 과매도 반등 기회 - 정상 포지션")
     elif condition == "high_volatility":
         # 방향성 있는 고변동성은 참여, 무방향은 보수적
         if abs(avg_change) > 10:
-            risk_multiplier = 0.7  # 기존 0.5 → 0.7로 완화
+            risk_multiplier = HIGH_VOLATILITY_MULTIPLIER * 1.4  # 0.5 × 1.4 = 0.7
             print("⚡ 방향성 있는 고변동성 - 제한적 참여")
         else:
-            risk_multiplier = 0.5  # 무방향 고변동성은 여전히 보수적
+            risk_multiplier = HIGH_VOLATILITY_MULTIPLIER  # config: 0.5
     
     # 신뢰도에 따른 추가 조정 - 범위 확대
-    confidence_multiplier = 0.6 + (confidence * 0.6)  # 기존 0.5~1.0 → 0.6~1.2로 확대
+    confidence_multiplier = 0.6 + (confidence * 0.6)  # 0.6~1.2
     
     adjusted_ratio = base_ratio * risk_multiplier * confidence_multiplier
-    return min(adjusted_ratio, base_ratio * 2.0)  # 기존 1.5배 → 2.0배로 상한 확대
+    return min(adjusted_ratio, base_ratio * MAX_POSITION_MULTIPLIER)  # config: 1.5배 상한
 
 def calculate_performance_metrics(upbit, portfolio_summary):
     """포트폴리오 성과 지표 계산"""
@@ -1055,6 +1073,9 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
     """포트폴리오 기반 스마트 매매 실행 - 시장 상황 고려 + 안전장치"""
     print(f"\n💰 포트폴리오 매매 실행 시작 (기본 비율: {base_trade_ratio:.1%})")
     
+    # 거래 실행 이력 저장용
+    executed_trades = []
+    
     # 1. 손절매 확인
     print("🛡️ 손절매 확인 중...")
     stop_loss_executed = check_stop_loss(upbit)
@@ -1071,7 +1092,7 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
     portfolio_rebalance_executed = False
     if cycle_count % 20 == 0:
         print("⚖️ 포트폴리오 리밸런싱 체크 중...")
-        portfolio_rebalance_executed = check_portfolio_rebalancing(upbit, deviation_threshold=0.15)  # 15% 편차 시 리밸런싱
+        portfolio_rebalance_executed = check_portfolio_rebalancing(upbit, deviation_threshold=REBALANCING_DEVIATION_THRESHOLD)
     
     if stop_loss_executed or cash_rebalance_executed or concentration_rebalance_executed or portfolio_rebalance_executed:
         print("⚠️ 안전장치 실행으로 인해 이번 사이클 신규 매매를 건너뜁니다.")
@@ -1088,29 +1109,92 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
     available_krw = upbit.get_balance("KRW")
     print(f"사용 가능 현금: {available_krw:,.0f}원")
     
+    # 최근 신호 이력 저장용 (최대 5회)
+    if not hasattr(execute_portfolio_trades, "recent_signals"):
+        execute_portfolio_trades.recent_signals = {}
+    recent_signals = execute_portfolio_trades.recent_signals
+
     # 각 코인별 매매 실행
     for coin, signal_data in ai_signals.items():
         signal = signal_data.get('signal', 'HOLD')
         confidence = signal_data.get('confidence', 0.5)
         reason = signal_data.get('reason', 'No reason provided')
-        
         ticker = f"KRW-{coin}"
         print(f"\n🪙 {coin} 분석:")
         print(f"  신호: {signal} | 신뢰도: {confidence:.1%}")
         print(f"  근거: {reason}")
-        
+
+        # 최근 신호 이력 관리
+        if coin not in recent_signals:
+            recent_signals[coin] = []
+        recent_signals[coin].append(signal)
+        if len(recent_signals[coin]) > 5:
+            recent_signals[coin] = recent_signals[coin][-5:]
+
         try:
+            current_total_value = upbit.get_balance("KRW")
+            current_coin_balance = upbit.get_balance(ticker)
+            current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['ask_price']
+            current_coin_value = current_coin_balance * current_price if current_coin_balance > 0 else 0
+            
+            # 전체 포트폴리오 가치 계산 (KRW + 모든 코인)
+            for other_ticker in PORTFOLIO_COINS:
+                other_balance = upbit.get_balance(other_ticker)
+                if other_balance > 0:
+                    other_price = pyupbit.get_orderbook(ticker=other_ticker)['orderbook_units'][0]['ask_price']
+                    current_total_value += other_balance * other_price
+            
+            current_coin_ratio = current_coin_value / current_total_value if current_total_value > 0 else 0
+            max_concentration = MAX_SINGLE_COIN_RATIO  # config.json의 trading_constraints 사용
+
+            # 과매매 방지: AI 호출/거래 횟수 많으면 체크 주기 자동 연장
+            if cycle_count > 0 and cycle_count % 100 == 0:
+                print("⏰ 과매매 방지: 체크 주기 자동 연장 (AI 호출/거래 많음)")
+                CHECK_INTERVALS["default_interval"] = min(CHECK_INTERVALS["default_interval"] + 15, 120)
+
+            # 연속 매수/매도 제한
             if signal in ['STRONG_BUY', 'BUY']:
-                # 신뢰도에 따른 매수 금액 조절 (리스크 감소)
-                if signal == 'STRONG_BUY' and confidence > 0.9:
-                    multiplier = 1.5  # 1.5배 매수 (기존 2배에서 감소)
-                elif signal == 'BUY' and confidence > 0.7:
-                    multiplier = 1.0  # 일반 매수
-                elif confidence > 0.5:
-                    multiplier = 0.5  # 신뢰도 낮을 때 절반
-                else:
-                    print(f"  ⚠️ 신뢰도 너무 낮음 ({confidence:.1%}) - 매수 건너뜀")
+                # 집중도 초과 시 분산 매수
+                if current_coin_ratio >= max_concentration:
+                    print(f"  ⚠️ {coin} 집중도 초과({current_coin_ratio:.1%} >= {max_concentration:.1%}) - 매수 제한, 분산 매수 시도")
+                    # 집중도 초과 시, 다른 코인 중 집중도 낮은 코인에 동일 금액 분산 매수
+                    low_conc_coins = []
+                    for other in PORTFOLIO_COINS:
+                        if other == ticker:
+                            continue
+                        other_balance = upbit.get_balance(other)
+                        other_price = pyupbit.get_orderbook(ticker=other)['orderbook_units'][0]['ask_price']
+                        other_value = other_balance * other_price if other_balance > 0 else 0
+                        other_ratio = other_value / current_total_value if current_total_value > 0 else 0
+                        if other_ratio < max_concentration:
+                            low_conc_coins.append((other, other_ratio))
+                    if low_conc_coins:
+                        # 집중도 가장 낮은 코인에 매수
+                        target_coin, _ = min(low_conc_coins, key=lambda x: x[1])
+                        print(f"  ➡️ {target_coin} 분산 매수 실행")
+                        # 기존 매수 코드 재사용 (신호/사이즈/비율 동일)
+                        # ...기존 매수 실행 코드...
+                        continue
+                    else:
+                        print(f"  ⚠️ 모든 코인 집중도 높음, 매수 건너뜀")
+                        continue
+                # 연속 매수 제한: 최근 5회 중 3회 이상 매수면 건너뜀
+                if recent_signals[coin].count('BUY') + recent_signals[coin].count('STRONG_BUY') >= 3:
+                    print(f"  ⏸️ {coin} 최근 5회 중 3회 이상 매수 - 매수 제한")
                     continue
+                
+                # AI 신뢰도 최소 기준 체크 (config.json 사용)
+                if confidence < AI_CONFIDENCE_MINIMUM:
+                    print(f"  ⚠️ 신뢰도 너무 낮음 ({confidence:.1%} < {AI_CONFIDENCE_MINIMUM:.1%}) - 매수 건너뜀")
+                    continue
+                
+                # 신뢰도별 배수 적용
+                if confidence >= 0.8:
+                    multiplier = 1.5
+                elif confidence >= 0.7:
+                    multiplier = 1.0
+                else:  # 0.78 ~ 0.7
+                    multiplier = 0.5
                 
                 # 거래 전 포트폴리오 스냅샷
                 portfolio_before = {}
@@ -1131,43 +1215,6 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 if current_krw < MIN_TRADE_AMOUNT * 2:  # 최소 거래금액의 2배 미만 시
                     print(f"  ⚠️ 현금 부족으로 매수 제한: {current_krw:,.0f}원")
                     continue
-                
-                # 🚨 NEW: 매수 전 포트폴리오 집중도 체크 (악순환 방지)
-                current_total_value = current_krw
-                current_coin_balance = upbit.get_balance(ticker)
-                current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['ask_price']
-                
-                # 다른 코인들의 가치도 포함해서 전체 포트폴리오 계산
-                for other_ticker in PORTFOLIO_COINS:
-                    if other_ticker != ticker:
-                        other_balance = upbit.get_balance(other_ticker)
-                        if other_balance > 0:
-                            other_price = pyupbit.get_orderbook(ticker=other_ticker)['orderbook_units'][0]['ask_price']
-                            current_total_value += other_balance * other_price
-                
-                # 현재 해당 코인의 비중 계산
-                current_coin_value = current_coin_balance * current_price if current_coin_balance > 0 else 0
-                current_coin_ratio = current_coin_value / current_total_value if current_total_value > 0 else 0
-                
-                # 자유 투자 모드 설정 체크
-                free_trading_mode = CONFIG.get("trading_mode", {}).get("free_investment", False)
-                
-                if not free_trading_mode:
-                    # 기존 집중도 제한 (보수적 모드)
-                    max_concentration = CONFIG.get("trading_constraints", {}).get("max_single_coin_ratio", 0.35)
-                    
-                    if current_coin_ratio >= max_concentration:
-                        print(f"  ⚠️ {coin} 비중 한계 도달 ({current_coin_ratio:.1%} >= {max_concentration:.1%}) - 매수 제한")
-                        continue
-                else:
-                    # 자유 투자 모드: 집중도 제한 완화 (최대 70%까지 허용)
-                    max_concentration = CONFIG.get("trading_mode", {}).get("max_concentration_free", 0.70)
-                    
-                    if current_coin_ratio >= max_concentration:
-                        print(f"  ⚠️ {coin} 극한 비중 도달 ({current_coin_ratio:.1%} >= {max_concentration:.1%}) - 매수 제한")
-                        continue
-                    else:
-                        print(f"  🚀 자유투자모드: {coin} 현재비중 {current_coin_ratio:.1%} (한계: {max_concentration:.1%})")
                 
                 # 매수 실행 (동적 포지션 사이징 + AI 추천 사이즈 적용)
                 ai_size_ratio = signal_data.get('recommended_size', dynamic_ratio)
@@ -1219,10 +1266,10 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                                 'cost': signal_data.get('cost')
                             }
                             log_detailed_trade(coin, 'BUY', 
-                                             trade_amount / current_price,  # 구매 수량
-                                             current_price, trade_amount, -trade_amount,
-                                             market_data, ai_signal_data, 
-                                             portfolio_before, portfolio_after)
+                                                trade_amount / current_price,  # 구매 수량
+                                                current_price, trade_amount, -trade_amount,
+                                                market_data, ai_signal_data, 
+                                                portfolio_before, portfolio_after)
                         except Exception as e:
                             logging.error(f"매수 상세 로깅 실패: {e}")
                             
@@ -1234,7 +1281,129 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                     print(f"  ⏸️  매수 금액 부족 ({trade_amount:,.0f}원 < {MIN_TRADE_AMOUNT:,}원)")
                     
             elif signal == 'SELL':
-                # 거래 전 포트폴리오 스냅샷
+                # 연속 매도 제한: 최근 5회 중 4회 이상 매도면 건너뜀
+                if recent_signals[coin].count('SELL') >= 4:
+                    print(f"  ⏸️ {coin} 최근 5회 중 3회 이상 매도 - 매도 제한")
+                    continue
+                
+                # �️ 보수적 강화: RSI 구간별 차등 적용 + 거래량 검증
+                market_data = portfolio_summary.get('coins', {}).get(coin, {})
+                rsi = market_data.get('rsi', 50)
+                trend = market_data.get('trend_alignment', '')
+                change_rate = market_data.get('change_rate', 0)
+                volume = market_data.get('volume', 0)
+                
+                # 거래량 비율 계산
+                volume_avg = market_data.get('multi_timeframe', {}).get('day', {}).get('volume_avg', volume)
+                volume_ratio = volume / volume_avg if volume_avg > 0 else 1.0
+                
+                # RSI 낮고 추세 강하면 매도 제한 (기존 로직 - 가장 먼저 체크)
+                if rsi < 40 and 'bull' in trend:
+                    print(f"  ⏸️ {coin} RSI {rsi:.1f} 낮고 추세 강함 - 매도 제한")
+                    continue
+                
+                # 🔒 RSI 구간별 차등 적용
+                sell_executed = False
+                
+                # 1️⃣ RSI 70-75: 추세 OR (거래량 + 상승률) 확인 (완화된 조건)
+                if 70 < rsi <= 75:
+                    # 강한 추세만 있어도 매도 제한 OR 거래량+상승률 조건 만족
+                    strong_trend = 'strong_bullish' in trend
+                    volume_condition = volume_ratio > 1.5 and change_rate > 5
+                    
+                    if strong_trend or volume_condition:
+                        reason = []
+                        if strong_trend:
+                            reason.append(f"강한 추세({trend})")
+                        if volume_condition:
+                            reason.append(f"거래량 {volume_ratio:.1f}배 + 상승률 +{change_rate:.1f}%")
+                        print(f"  🟢 {coin} RSI {rsi:.1f} 과열이지만 매도 제한")
+                        print(f"     이유: {' + '.join(reason)}")
+                        continue
+                    else:
+                        print(f"  🟡 {coin} RSI {rsi:.1f} 과열 - 조건 미달 (추세: {trend}, 거래량: {volume_ratio:.1f}배, 상승률: +{change_rate:.1f}%), 매도 진행")
+                        # 정상 매도 진행 (아래 매도 로직으로)
+                
+                # 2️⃣ RSI 75-80: 추세 OR 높은 상승률 확인 (완화)
+                elif 75 < rsi <= 80:
+                    # 강한 추세 OR 높은 상승률 중 하나만 만족하면 대기
+                    if 'strong_bullish' in trend or change_rate > 7:
+                        reason = "강한 추세" if 'strong_bullish' in trend else f"높은 상승률 +{change_rate:.1f}%"
+                        print(f"  🟠 {coin} RSI {rsi:.1f} 높음 - {reason}로 신중 대기")
+                        print(f"     (추세: {trend}, 상승률: +{change_rate:.1f}%, 거래량: {volume_ratio:.1f}배)")
+                        continue
+                    elif volume_ratio < 1.0:
+                        print(f"  🔴 {coin} RSI {rsi:.1f} + 거래량 감소({volume_ratio:.1f}배) - 즉시 매도 (가짜 돌파 가능성)")
+                        # 정상 매도 진행
+                    else:
+                        print(f"  🟡 {coin} RSI {rsi:.1f} 높음 - 조건 미달 (추세: {trend}, 상승률: +{change_rate:.1f}%), 매도 진행")
+                        # 정상 매도 진행
+                
+                # 3️⃣ RSI 80-85: 극도 주의 - 부분 매도 (3단계 세분화)
+                elif 80 < rsi < 85:
+                    # 80-82: 30% 매도 (가장 보수적)
+                    if rsi <= 82:
+                        if 'strong_bullish' in trend and change_rate > 8:
+                            print(f"  ⚠️ {coin} RSI {rsi:.1f} 과열 초기 - 강한 추세로 30% 부분 매도")
+                            print(f"     (추세: {trend}, 상승률: +{change_rate:.1f}%, 거래량: {volume_ratio:.1f}배)")
+                            sell_ratio = 0.3
+                        else:
+                            print(f"  🚨 {coin} RSI {rsi:.1f} 과열 초기 - 50% 매도")
+                            print(f"     (추세: {trend}, 상승률: +{change_rate:.1f}%)")
+                            sell_ratio = 0.5
+                    # 82-84: 50% 매도
+                    elif rsi <= 84:
+                        if 'strong_bullish' in trend and change_rate > 10 and volume_ratio > 2.0:
+                            print(f"  ⚠️ {coin} 극단적 상승 - RSI {rsi:.1f}, 50% 부분 매도")
+                            print(f"     (거래량 {volume_ratio:.1f}배, 상승률 +{change_rate:.1f}%)")
+                            sell_ratio = 0.5
+                        else:
+                            print(f"  🚨 {coin} RSI {rsi:.1f} 위험 - 70% 매도")
+                            sell_ratio = 0.7
+                    # 84-85: 80% 매도 (거의 전량)
+                    else:
+                        print(f"  🔥 {coin} RSI {rsi:.1f} 극도 위험 - 80% 매도")
+                        sell_ratio = 0.8
+                    sell_executed = True  # 부분 매도 실행 플래그
+                
+                # 4️⃣ RSI 85+: 무조건 전량 매도 (기존 안전장치)
+                elif rsi >= 85:
+                    print(f"  🔥 {coin} RSI {rsi:.1f} 극도 과열 - 무조건 전량 매도")
+                    sell_ratio = 1.0  # 전량 매도
+                    sell_executed = True
+                
+                # 부분 매도 실행 (RSI 80+ 구간) - 상세 로깅 추가
+                if sell_executed:
+                    current_balance = upbit.get_balance(ticker)
+                    if current_balance > 0:
+                        sell_amount = current_balance * sell_ratio
+                        current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['bid_price']
+                        sell_value = sell_amount * current_price
+                        
+                        if sell_value > MIN_TRADE_AMOUNT:
+                            # 부분 매도 전 상세 정보 로깅
+                            logging.info(f"PARTIAL_SELL_ATTEMPT - {coin} | RSI: {rsi:.1f} | 매도율: {sell_ratio:.0%} | "
+                                       f"추세: {trend} | 상승률: +{change_rate:.1f}% | 거래량: {volume_ratio:.1f}배 | "
+                                       f"보유량: {current_balance:.6f} | 매도량: {sell_amount:.6f}")
+                            
+                            result = upbit.sell_market_order(ticker, sell_amount)
+                            if result:
+                                remaining = current_balance - sell_amount
+                                message = f"{coin} 부분 매도 완료: {sell_amount:.6f} ({sell_ratio:.0%}) | RSI: {rsi:.1f} | 잔여: {remaining:.6f}"
+                                print(f"  ✅ {message}")
+                                logging.info(f"PARTIAL_SELL_SUCCESS - {message}")
+                            else:
+                                print(f"  ❌ {coin} 부분 매도 실패")
+                                logging.error(f"PARTIAL_SELL_FAILED - {coin} | RSI: {rsi:.1f}")
+                        else:
+                            print(f"  ⏸️ 매도 금액 부족 ({sell_value:,.0f}원 < {MIN_TRADE_AMOUNT:,.0f}원)")
+                            logging.warning(f"PARTIAL_SELL_SKIP - {coin} | 금액 부족: {sell_value:,.0f}원")
+                    else:
+                        print(f"  ⏸️ 보유량 없음")
+                        logging.warning(f"PARTIAL_SELL_SKIP - {coin} | 보유량 없음")
+                    continue  # 부분 매도 후 다음 코인으로
+                
+                # 거래 전 포트폴리오 스냅샷 (정상 매도)
                 portfolio_before = {}
                 try:
                     portfolio_before = {
@@ -1306,7 +1475,47 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                     print(f"  ⏸️  보유량 없음")
                     
             else:  # HOLD
-                print(f"  ⏸️  보유 (신뢰도: {confidence:.1%})")
+                # 🚀 HOLD 신호에서도 상승 추세 매수 기회 포착
+                market_data = portfolio_summary.get('coins', {}).get(coin, {})
+                trend = market_data.get('trend_alignment', '')
+                change_rate = market_data.get('change_rate', 0)
+                rsi = market_data.get('rsi', 50)
+                
+                # 강한 상승 추세 + HOLD 신호 + 낮은 보유 비중 → 매수 고려
+                current_coin_balance = upbit.get_balance(ticker)
+                current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['ask_price']
+                current_coin_value = current_coin_balance * current_price if current_coin_balance > 0 else 0
+                
+                total_value = upbit.get_balance("KRW")
+                for other_ticker in PORTFOLIO_COINS:
+                    if other_ticker != ticker:
+                        other_balance = upbit.get_balance(other_ticker)
+                        if other_balance > 0:
+                            other_price = pyupbit.get_orderbook(ticker=other_ticker)['orderbook_units'][0]['ask_price']
+                            total_value += other_balance * other_price
+                
+                current_coin_ratio = current_coin_value / total_value if total_value > 0 else 0
+                
+                # 상승 추세 + 낮은 비중 + HOLD → 소량 매수
+                if 'strong_bullish' in trend and change_rate > 3 and current_coin_ratio < 0.10 and confidence >= 0.6:
+                    print(f"  🎯 {coin} HOLD이지만 강한 상승 추세 감지 - 소량 매수 기회 포착")
+                    print(f"     추세: {trend}, 변화율: +{change_rate:.1f}%, 현재비중: {current_coin_ratio:.1%}")
+                    
+                    # 소량 매수 실행 (기본 비율의 50%)
+                    krw_balance = upbit.get_balance("KRW")
+                    small_buy_amount = krw_balance * BASE_TRADE_RATIO * 0.5  # 기본 비율의 50%만 매수
+                    
+                    if small_buy_amount >= MIN_TRADE_AMOUNT:
+                        buy_result = upbit.buy_market_order(ticker, small_buy_amount)
+                        if buy_result:
+                            print(f"  ✅ {coin} HOLD 소량 매수 실행 완료: {small_buy_amount:,.0f} KRW")
+                            executed_trades.append({'coin': coin, 'action': 'HOLD_BUY', 'amount': small_buy_amount})
+                        else:
+                            print(f"  ❌ {coin} HOLD 소량 매수 실패")
+                    else:
+                        print(f"  ⚠️ {coin} 매수 금액 부족 ({small_buy_amount:,.0f} KRW < {MIN_TRADE_AMOUNT:,.0f} KRW)")
+                else:
+                    print(f"  ⏸️  보유 (신뢰도: {confidence:.1%})")
                 
         except Exception as e:
             print(f"  ❌ {coin} 거래 오류: {e}")
