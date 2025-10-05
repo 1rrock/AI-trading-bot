@@ -9,6 +9,7 @@
 
 # Log Files
 *.log
+log/
 
 # Cache Files
 news_cache.json

@@ -10,6 +10,37 @@ import logging
 from datetime import datetime, timedelta
 import numpy as np
 
+# === 거래 쿨다운 추적 (전역 변수) ===
+last_partial_sell_time = {}  # 부분매도 쿨다운
+daily_sell_count = {}  # 일별 매도 횟수
+last_reset_date = None  # 마지막 리셋 날짜
+last_rebalance_time = {}  # 리밸런싱 쿨다운 (악순환 방지)
+
+# === 의사결정 로깅 강화 (디버깅용) ===
+def log_decision(action: str, coin: str, allowed: bool, reason: str, context: dict):
+    """
+    거래 의사결정을 상세하게 로깅
+    
+    Args:
+        action: 'BUY', 'SELL', 'PARTIAL_SELL', 'REBALANCE' 등
+        coin: 코인 심볼
+        allowed: 허용 여부 (True/False)
+        reason: 결정 이유
+        context: 추가 컨텍스트 정보
+    """
+    status = "✅ 허용" if allowed else "❌ 거부"
+    
+    # 콘솔 출력 (간략)
+    if not allowed:
+        print(f"  {status} {coin} {action}: {reason}")
+    
+    # 로그 파일 출력 (상세)
+    logging.info(f"===== {action} 의사결정: {coin} =====")
+    logging.info(f"결과: {status}")
+    logging.info(f"이유: {reason}")
+    logging.info(f"컨텍스트: {json.dumps(context, ensure_ascii=False, indent=2)}")
+    logging.info("=" * 60)
+
 # === 설정 로드 ===
 def load_config():
     """설정 파일에서 설정을 로드합니다."""
@@ -655,9 +686,9 @@ def get_portfolio_ai_signals(portfolio_summary, max_retries=3):
 
 
 def check_cash_shortage_rebalance(upbit, min_cash_ratio=None):
-    """현금 부족 시 자동 리밸런싱 - 수익 코인 우선 매도"""
+    """현금 부족 시 자동 리밸런싱 - 15% 미만 시 수익 코인 우선 매도"""
     if min_cash_ratio is None:
-        min_cash_ratio = MIN_CASH_RATIO
+        min_cash_ratio = 0.15  # 최소 15% 현금 유지 (위험 구간)
     
     try:
         krw_balance = upbit.get_balance("KRW")
@@ -669,7 +700,10 @@ def check_cash_shortage_rebalance(upbit, min_cash_ratio=None):
             coin = ticker.split('-')[1]
             balance = upbit.get_balance(ticker)
             if balance > 0:
-                current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['bid_price']
+                orderbook = pyupbit.get_orderbook(ticker=ticker)
+                if not orderbook or 'orderbook_units' not in orderbook or not orderbook['orderbook_units']:
+                    continue
+                current_price = orderbook['orderbook_units'][0]['bid_price']
                 avg_buy_price = upbit.get_avg_buy_price(ticker)
                 coin_value = balance * current_price
                 total_portfolio_value += coin_value
@@ -692,41 +726,48 @@ def check_cash_shortage_rebalance(upbit, min_cash_ratio=None):
         # 현금 비율 체크
         cash_ratio = krw_balance / total_portfolio_value if total_portfolio_value > 0 else 0
         
-        if cash_ratio < min_cash_ratio:  # 현금이 15% 미만일 때
-            print(f"🚨 현금 부족 감지! 현재 현금 비율: {cash_ratio:.1%}")
-            print("💸 스마트 리밸런싱 실행...")
+        if cash_ratio < min_cash_ratio:  # 현금이 15% 미만일 때 (위험 구간)
+            target_cash_ratio = 0.20  # 20% 목표로 복구
+            print(f"🚨 현금 위험 수준 감지! 현재 {cash_ratio:.1%} → 목표 {target_cash_ratio:.0%}")
+            print("💸 긴급 리밸런싱 실행...")
+            
+            # 필요한 현금 금액 계산
+            needed_cash = (total_portfolio_value * target_cash_ratio) - krw_balance
             
             # 수익 나는 코인부터 매도 (수익률 높은 순)
-            profitable_coins = [c for c in coin_data if c['profit_percent'] > 3]  # 3% 이상 수익
+            profitable_coins = [c for c in coin_data if c['profit_percent'] > 2]  # 2% 이상 수익
             profitable_coins.sort(key=lambda x: x['profit_percent'], reverse=True)
             
             if profitable_coins:
-                # 가장 수익률 높은 코인의 30% 매도
+                # 가장 수익률 높은 코인 매도
                 target_coin = profitable_coins[0]
-                sell_ratio = 0.3
-                sell_amount = target_coin['balance'] * sell_ratio
+                sell_amount = min(needed_cash / target_coin['current_price'], target_coin['balance'] * 0.5)
                 
-                result = upbit.sell_market_order(target_coin['ticker'], sell_amount)
-                if result:
-                    sell_value = sell_amount * target_coin['current_price']
-                    print(f"  ✅ {target_coin['coin']} 수익실현 매도: {sell_amount:.6f}개")
-                    print(f"     수익률: {target_coin['profit_percent']:+.1f}% | 금액: {sell_value:,.0f}원")
-                    return True
-            else:
-                # 수익 코인이 없으면 가장 작은 손실 코인 매도
-                loss_coins = [c for c in coin_data if c['profit_percent'] <= 0]
-                if loss_coins:
-                    loss_coins.sort(key=lambda x: x['profit_percent'], reverse=True)  # 손실 적은 순
-                    target_coin = loss_coins[0]
-                    sell_ratio = 0.2  # 20%만 매도 (손실 최소화)
-                    sell_amount = target_coin['balance'] * sell_ratio
-                    
+                if sell_amount * target_coin['current_price'] >= MIN_TRADE_AMOUNT:
                     result = upbit.sell_market_order(target_coin['ticker'], sell_amount)
                     if result:
                         sell_value = sell_amount * target_coin['current_price']
-                        print(f"  ⚠️ {target_coin['coin']} 현금확보 매도: {sell_amount:.6f}개")
-                        print(f"     손실률: {target_coin['profit_percent']:+.1f}% | 금액: {sell_value:,.0f}원")
+                        print(f"  ✅ {target_coin['coin']} 수익실현 매도")
+                        print(f"     수익률: {target_coin['profit_percent']:+.1f}% | 금액: {sell_value:,.0f}원")
+                        print(f"     예상 현금 비중: {cash_ratio:.1%} → {target_cash_ratio:.0%}")
+                        logging.info(f"CASH_REBALANCE - {target_coin['coin']}: {cash_ratio:.1%} → {target_cash_ratio:.0%} (수익실현: {sell_value:,.0f}원)")
                         return True
+            else:
+                # 수익 코인이 없으면 가장 비중 높은 코인 일부 매도
+                coin_data.sort(key=lambda x: x['value'], reverse=True)
+                if coin_data:
+                    target_coin = coin_data[0]
+                    sell_amount = min(needed_cash / target_coin['current_price'], target_coin['balance'] * 0.3)
+                    
+                    if sell_amount * target_coin['current_price'] >= MIN_TRADE_AMOUNT:
+                        result = upbit.sell_market_order(target_coin['ticker'], sell_amount)
+                        if result:
+                            sell_value = sell_amount * target_coin['current_price']
+                            print(f"  ⚠️ {target_coin['coin']} 현금확보 매도")
+                            print(f"     수익률: {target_coin['profit_percent']:+.1f}% | 금액: {sell_value:,.0f}원")
+                            print(f"     예상 현금 비중: {cash_ratio:.1%} → {target_cash_ratio:.0%}")
+                            logging.info(f"CASH_REBALANCE - {target_coin['coin']}: {cash_ratio:.1%} → {target_cash_ratio:.0%} (현금확보: {sell_value:,.0f}원)")
+                            return True
                     
         return False
         
@@ -735,9 +776,11 @@ def check_cash_shortage_rebalance(upbit, min_cash_ratio=None):
         return False
 
 def check_portfolio_concentration_limits(upbit, max_single_position=None):
-    """포트폴리오 집중도 제한 체크 - 45% 초과 시 매도"""
+    """포트폴리오 집중도 제한 체크 - 35% 초과 시 자동 매도로 33% 수준 조정"""
     if max_single_position is None:
-        max_single_position = MAX_PORTFOLIO_CONCENTRATION
+        max_single_position = MAX_SINGLE_COIN_RATIO  # 35% 사용
+    
+    global last_rebalance_time  # 쿨다운 시간 기록
     
     try:
         krw_balance = upbit.get_balance("KRW")
@@ -749,7 +792,10 @@ def check_portfolio_concentration_limits(upbit, max_single_position=None):
             coin = ticker.split('-')[1]
             balance = upbit.get_balance(ticker)
             if balance > 0:
-                current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['bid_price']
+                orderbook = pyupbit.get_orderbook(ticker=ticker)
+                if not orderbook or 'orderbook_units' not in orderbook or not orderbook['orderbook_units']:
+                    continue
+                current_price = orderbook['orderbook_units'][0]['bid_price']
                 coin_value = balance * current_price
                 total_portfolio_value += coin_value
                 coin_data.append({
@@ -763,23 +809,38 @@ def check_portfolio_concentration_limits(upbit, max_single_position=None):
         # 비중 계산 및 초과 체크
         for coin_info in coin_data:
             coin_ratio = coin_info['value'] / total_portfolio_value if total_portfolio_value > 0 else 0
-            target_ratio = MAX_SINGLE_COIN_RATIO  # config.json의 max_single_coin_ratio 사용
+            
+            # 35% 초과 시 33%로 조정
             if coin_ratio > max_single_position:
-                print(f"⚖️ {coin_info['coin']} 비중 초과 감지: {coin_ratio:.1%}")
-                excess_ratio = coin_ratio - target_ratio
-                sell_ratio = excess_ratio / coin_ratio  # 초과분 비율
-                if sell_ratio > 0.03:  # 3% 이상 초과시만 실행
-                    sell_amount = coin_info['balance'] * sell_ratio
+                target_ratio = 0.33  # 33% 목표 (안전 마진 2%)
+                print(f"⚖️ {coin_info['coin']} 비중 초과 감지: {coin_ratio:.1%} → {target_ratio:.0%} 목표")
+                
+                # 초과분 계산 (현재 - 목표)
+                excess_value = coin_info['value'] - (total_portfolio_value * target_ratio)
+                sell_amount = excess_value / coin_info['current_price']
+                
+                # 최소 거래량 체크 (5,000원 이상)
+                if excess_value >= MIN_TRADE_AMOUNT:
                     result = upbit.sell_market_order(coin_info['ticker'], sell_amount)
                     if result:
-                        sell_value = sell_amount * coin_info['current_price']
-                        print(f"  ✅ {coin_info['coin']} 집중도 해소: {coin_ratio:.1%} → {target_ratio:.0%} 목표")
-                        print(f"     매도량: {sell_amount:.6f}개 | 금액: {sell_value:,.0f}원")
+                        print(f"  ✅ {coin_info['coin']} 집중도 리밸런싱 완료")
+                        print(f"     매도량: {sell_amount:.6f}개 | 금액: {excess_value:,.0f}원")
+                        print(f"     예상 비중: {coin_ratio:.1%} → {target_ratio:.0%}")
+                        logging.info(f"CONCENTRATION_REBALANCE - {coin_info['coin']}: {coin_ratio:.1%} → {target_ratio:.0%} (매도: {excess_value:,.0f}원)")
+                        
+                        # 🔴 리밸런싱 쿨다운 시간 기록 (악순환 방지)
+                        last_rebalance_time[coin_info['coin']] = time.time()
+                        print(f"  ⏰ {coin_info['coin']} 리밸런싱 쿨다운 시작 (2시간)")
+                        
                         return True
+                else:
+                    print(f"  ⏸️ {coin_info['coin']} 초과분 {excess_value:,.0f}원 - 최소 거래금액 미만")
+        
         return False
         
     except Exception as e:
         print(f"❌ 포트폴리오 집중도 체크 오류: {e}")
+        logging.error(f"CONCENTRATION_CHECK_ERROR: {e}")
         return False
 
 def check_portfolio_rebalancing(upbit, deviation_threshold=0.15):
@@ -940,11 +1001,12 @@ def check_stop_loss(upbit, stop_loss_percent=STOP_LOSS_PERCENT):
     
     return stop_loss_executed
 
-def calculate_dynamic_position_size(market_condition, base_ratio=BASE_TRADE_RATIO):
+def calculate_dynamic_position_size(market_condition, base_ratio=BASE_TRADE_RATIO, upbit=None):
     """시장 상황에 따른 동적 포지션 사이징 - config.json 승수 사용"""
     condition = market_condition.get("condition", "sideways")
     confidence = market_condition.get("confidence", 0.5)
     avg_change = market_condition.get("avg_change", 0)
+    fng_value = market_condition.get("fng_value", "50")
     
     # 시장 상황별 리스크 조정 - config.json의 risk_management 섹션 사용
     risk_multiplier = 1.0
@@ -970,6 +1032,40 @@ def calculate_dynamic_position_size(market_condition, base_ratio=BASE_TRADE_RATI
             print("⚡ 방향성 있는 고변동성 - 제한적 참여")
         else:
             risk_multiplier = HIGH_VOLATILITY_MULTIPLIER  # config: 0.5
+    elif condition == "sideways":
+        # 🔴 현금 비중 과다 시 강제 매수 활성화
+        current_krw = upbit.get_balance("KRW") if upbit else 0
+        total_value = current_krw
+        
+        # 총 자산 계산
+        if upbit:
+            for coin in [c.split('-')[1] for c in PORTFOLIO_COINS]:
+                ticker = f"KRW-{coin}"
+                balance = upbit.get_balance(ticker)
+                if balance > 0:
+                    try:
+                        current_price = pyupbit.get_current_price(ticker)
+                        if current_price:
+                            total_value += balance * current_price
+                    except:
+                        pass
+        
+        cash_ratio = current_krw / total_value if total_value > 0 else 0
+        
+        # 횡보장 + 탐욕 구간 = 추가 감소
+        try:
+            fng_int = int(fng_value)
+            if cash_ratio > 0.40:
+                # 🔴 현금 40% 초과 시 강제 매수 (횡보 페널티 무시)
+                risk_multiplier = 1.0
+                print(f"💰 현금 비중 과다 ({cash_ratio*100:.1f}%) - 강제 매수 활성화 (횡보 페널티 무시)")
+            elif fng_int > 70:
+                risk_multiplier = 0.85  # 15% 감소 (기존 0.75에서 완화)
+                print(f"⏸️ 횡보장 + 탐욕 구간 - 거래 보수적 (0.85배) | 현금: {cash_ratio*100:.1f}%")
+            else:
+                risk_multiplier = 0.9  # 10% 감소
+        except:
+            risk_multiplier = 0.9
     
     # 신뢰도에 따른 추가 조정 - 범위 확대
     confidence_multiplier = 0.6 + (confidence * 0.6)  # 0.6~1.2
@@ -1100,7 +1196,7 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
     
     # 2. 시장 상황 분석
     market_condition = portfolio_summary.get("market_condition", {})
-    dynamic_ratio = calculate_dynamic_position_size(market_condition, base_trade_ratio)
+    dynamic_ratio = calculate_dynamic_position_size(market_condition, base_trade_ratio, upbit=upbit)
     
     print(f"📊 시장 상황: {market_condition.get('condition', 'unknown')}")
     print(f"🎯 조정된 거래 비율: {dynamic_ratio:.1%} (기본: {base_trade_ratio:.1%})")
@@ -1134,15 +1230,39 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
         try:
             current_total_value = upbit.get_balance("KRW")
             current_coin_balance = upbit.get_balance(ticker)
-            current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['ask_price']
+            
+            # 안전한 가격 조회 - 더 강화된 검증
+            orderbook = pyupbit.get_orderbook(ticker=ticker)
+            if not orderbook:
+                logging.warning(f"{coin} 호가 정보 없음 (None) - 건너뜀")
+                print(f"  ⚠️ {coin} 호가 정보 없음")
+                continue
+            
+            if 'orderbook_units' not in orderbook:
+                logging.warning(f"{coin} orderbook_units 키 없음 - 건너뜀")
+                print(f"  ⚠️ {coin} 호가 구조 오류")
+                continue
+                
+            if not orderbook['orderbook_units'] or len(orderbook['orderbook_units']) == 0:
+                logging.warning(f"{coin} orderbook_units 비어있음 - 건너뜀")
+                print(f"  ⚠️ {coin} 호가 데이터 없음")
+                continue
+            
+            current_price = orderbook['orderbook_units'][0]['ask_price']
             current_coin_value = current_coin_balance * current_price if current_coin_balance > 0 else 0
             
-            # 전체 포트폴리오 가치 계산 (KRW + 모든 코인)
+            # 전체 포트폴리오 가치 계산 (KRW + 모든 코인) - 개별 예외 처리
             for other_ticker in PORTFOLIO_COINS:
-                other_balance = upbit.get_balance(other_ticker)
-                if other_balance > 0:
-                    other_price = pyupbit.get_orderbook(ticker=other_ticker)['orderbook_units'][0]['ask_price']
-                    current_total_value += other_balance * other_price
+                try:
+                    other_balance = upbit.get_balance(other_ticker)
+                    if other_balance > 0:
+                        other_orderbook = pyupbit.get_orderbook(ticker=other_ticker)
+                        if other_orderbook and 'orderbook_units' in other_orderbook and other_orderbook['orderbook_units']:
+                            other_price = other_orderbook['orderbook_units'][0]['ask_price']
+                            current_total_value += other_balance * other_price
+                except Exception as e:
+                    logging.debug(f"{other_ticker} 조회 실패 (무시하고 계속): {e}")
+                    continue
             
             current_coin_ratio = current_coin_value / current_total_value if current_total_value > 0 else 0
             max_concentration = MAX_SINGLE_COIN_RATIO  # config.json의 trading_constraints 사용
@@ -1154,33 +1274,122 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
 
             # 연속 매수/매도 제한
             if signal in ['STRONG_BUY', 'BUY']:
-                # 집중도 초과 시 분산 매수
+                # 집중도 초과 시 분산 매수 시도 (AI 신호 확인)
                 if current_coin_ratio >= max_concentration:
                     print(f"  ⚠️ {coin} 집중도 초과({current_coin_ratio:.1%} >= {max_concentration:.1%}) - 매수 제한, 분산 매수 시도")
-                    # 집중도 초과 시, 다른 코인 중 집중도 낮은 코인에 동일 금액 분산 매수
+                    
+                    # BUY/HOLD 신호이고 집중도 낮은 코인 찾기
                     low_conc_coins = []
                     for other in PORTFOLIO_COINS:
                         if other == ticker:
                             continue
-                        other_balance = upbit.get_balance(other)
-                        other_price = pyupbit.get_orderbook(ticker=other)['orderbook_units'][0]['ask_price']
-                        other_value = other_balance * other_price if other_balance > 0 else 0
-                        other_ratio = other_value / current_total_value if current_total_value > 0 else 0
-                        if other_ratio < max_concentration:
-                            low_conc_coins.append((other, other_ratio))
+                        
+                        # AI 신호 확인 (중요!)
+                        other_coin_name = other.replace("KRW-", "")
+                        other_signal_data = ai_signals.get(other_coin_name, {})
+                        other_signal = other_signal_data.get('signal', 'HOLD')
+                        other_confidence = other_signal_data.get('confidence', 0)
+                        
+                        # SELL 신호이거나 신뢰도 낮으면 분산 매수 제외
+                        if other_signal in ['SELL', 'STRONG_SELL']:
+                            logging.info(f"분산매수 제외 - {other_coin_name}: {other_signal} 신호 (신뢰도: {other_confidence:.1%})")
+                            print(f"     ❌ {other_coin_name}: {other_signal} 신호로 제외")
+                            continue
+                        
+                        # 신뢰도 기준 상향: 60% 미만 제외
+                        if other_confidence < 0.6:
+                            logging.info(f"분산매수 제외 - {other_coin_name}: 신뢰도 낮음 ({other_confidence:.1%})")
+                            print(f"     ❌ {other_coin_name}: 신뢰도 {other_confidence:.1%} 낮아 제외 (60% 미만)")
+                            continue
+                        
+                        # 집중도 및 호가 확인
+                        try:
+                            other_balance = upbit.get_balance(other)
+                            other_orderbook = pyupbit.get_orderbook(ticker=other)
+                            if not other_orderbook or 'orderbook_units' not in other_orderbook or not other_orderbook['orderbook_units']:
+                                logging.debug(f"{other} 호가 정보 없음 (분산매수 제외)")
+                                continue
+                            other_price = other_orderbook['orderbook_units'][0]['ask_price']
+                            other_value = other_balance * other_price if other_balance > 0 else 0
+                            other_ratio = other_value / current_total_value if current_total_value > 0 else 0
+                            
+                            if other_ratio < max_concentration:
+                                low_conc_coins.append((other, other_ratio, other_signal, other_confidence))
+                                print(f"     ✅ {other_coin_name}: {other_signal} {other_confidence:.0%} | 비중 {other_ratio:.1%}")
+                        except Exception as e:
+                            logging.debug(f"{other} 분산매수 집중도 조회 실패 (무시): {e}")
+                            continue
+                    
                     if low_conc_coins:
-                        # 집중도 가장 낮은 코인에 매수
-                        target_coin, _ = min(low_conc_coins, key=lambda x: x[1])
-                        print(f"  ➡️ {target_coin} 분산 매수 실행")
-                        # 기존 매수 코드 재사용 (신호/사이즈/비율 동일)
-                        # ...기존 매수 실행 코드...
+                        # 집중도 가장 낮은 코인에 분산 매수 실행
+                        target_ticker, target_ratio, target_signal, target_confidence = min(low_conc_coins, key=lambda x: x[1])
+                        target_coin_name = target_ticker.replace("KRW-", "")
+                        print(f"  ➡️ {target_coin_name} 분산 매수 실행 (신호: {target_signal} {target_confidence:.0%}, 비중: {target_ratio:.1%})")
+                        
+                        # 분산 매수 금액 계산 (원래 매수하려던 금액의 50%)
+                        current_krw = upbit.get_balance("KRW")
+                        diversify_amount = current_krw * dynamic_ratio * 0.5 * 0.9995
+                        
+                        if diversify_amount >= MIN_TRADE_AMOUNT and current_krw >= MIN_TRADE_AMOUNT * 2:
+                            try:
+                                result = upbit.buy_market_order(target_ticker, diversify_amount)
+                                if result:
+                                    print(f"  ✅ {target_coin_name} 분산 매수 완료: {diversify_amount:,.0f}원")
+                                    logging.info(f"DIVERSIFY_BUY - {target_coin_name}: {diversify_amount:,.0f}원 (신호: {target_signal} {target_confidence:.0%}, 원래: {coin} 집중도 초과)")
+                                    executed_trades.append({'coin': target_coin_name, 'action': 'DIVERSIFY_BUY', 'amount': diversify_amount})
+                                else:
+                                    print(f"  ❌ {target_coin_name} 분산 매수 실패")
+                            except Exception as e:
+                                print(f"  ❌ {target_coin_name} 분산 매수 오류: {e}")
+                                logging.error(f"DIVERSIFY_BUY_ERROR - {target_coin_name}: {e}")
+                        else:
+                            print(f"  ⏸️ 분산 매수 금액 부족 ({diversify_amount:,.0f}원)")
                         continue
                     else:
-                        print(f"  ⚠️ 모든 코인 집중도 높음, 매수 건너뜀")
+                        # BUY/HOLD 신호 코인이 없거나 모두 집중도 높음 → 현금 유지
+                        print(f"  ⚠️ 분산 매수 가능한 코인 없음 (BUY/HOLD 신호 없음 또는 집중도 초과)")
+                        print(f"  💰 현금 유지 - 다음 기회 대기")
+                        logging.info(f"BUY_SKIP - {coin}: 집중도 초과, 분산 매수 불가 (현금 유지)")
                         continue
+                
+                # 🔴 비중 기반 매수 제한 (악순환 방지)
+                current_allocation = portfolio_summary.get('portfolio_allocation', {}).get(coin, 0)
+                if current_allocation > MAX_SINGLE_COIN_RATIO * 0.8:  # 35%의 80% = 28%
+                    log_decision('BUY', coin, False, '비중 초과 (리밸런싱 악순환 방지)', {
+                        'current_allocation': f"{current_allocation:.1%}",
+                        'threshold': '28%',
+                        'confidence': f"{confidence:.1%}",
+                        'signal': signal
+                    })
+                    continue
+                
+                # 🔴 리밸런싱 직후 쿨다운 체크 (2시간)
+                global last_rebalance_time
+                if coin in last_rebalance_time:
+                    time_since_rebalance = time.time() - last_rebalance_time[coin]
+                    if time_since_rebalance < 2 * 60 * 60:  # 2시간
+                        hours_remaining = (2 * 60 * 60 - time_since_rebalance) / 3600
+                        log_decision('BUY', coin, False, '리밸런싱 쿨다운', {
+                            'time_since_rebalance': f"{time_since_rebalance/3600:.1f}시간",
+                            'cooldown_remaining': f"{hours_remaining:.1f}시간",
+                            'confidence': f"{confidence:.1%}",
+                            'signal': signal
+                        })
+                        continue
+                
                 # 연속 매수 제한: 최근 5회 중 3회 이상 매수면 건너뜀
-                if recent_signals[coin].count('BUY') + recent_signals[coin].count('STRONG_BUY') >= 3:
-                    print(f"  ⏸️ {coin} 최근 5회 중 3회 이상 매수 - 매수 제한")
+                # 🔴 강제 매수 모드에서는 완화 (3회 → 6회)
+                cash_ratio = current_krw / total_value if total_value > 0 else 0
+                consecutive_buy_limit = 6 if cash_ratio > 0.40 else 3
+                buy_count = recent_signals[coin].count('BUY') + recent_signals[coin].count('STRONG_BUY')
+                if buy_count >= consecutive_buy_limit:
+                    log_decision('BUY', coin, False, f'연속 매수 제한 ({buy_count}/{consecutive_buy_limit})', {
+                        'recent_signals': recent_signals[coin],
+                        'cash_ratio': f"{cash_ratio:.1%}",
+                        'force_buy_mode': cash_ratio > 0.40,
+                        'confidence': f"{confidence:.1%}",
+                        'signal': signal
+                    })
                     continue
                 
                 # AI 신뢰도 최소 기준 체크 (config.json 사용)
@@ -1211,6 +1420,37 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 # 매수 실행 전 추가 안전 체크
                 current_krw = upbit.get_balance("KRW")
                 
+                # 현금 비중 30% 미만 시 매수 중단
+                current_portfolio_value = current_krw
+                for temp_ticker in PORTFOLIO_COINS:
+                    try:
+                        temp_balance = upbit.get_balance(temp_ticker)
+                        if temp_balance > 0:
+                            temp_orderbook = pyupbit.get_orderbook(ticker=temp_ticker)
+                            if temp_orderbook and 'orderbook_units' in temp_orderbook and temp_orderbook['orderbook_units']:
+                                temp_price = temp_orderbook['orderbook_units'][0]['ask_price']
+                                current_portfolio_value += temp_balance * temp_price
+                    except:
+                        continue
+                
+                cash_ratio = current_krw / current_portfolio_value if current_portfolio_value > 0 else 0
+                
+                # 매수 가능 여부를 현금 비중이 아닌 절대 금액으로 판단
+                # 현금 20% 권장이지만, 충분한 금액 있으면 매수 허용
+                min_required_cash = MIN_TRADE_AMOUNT * 3  # 최소 거래금액의 3배 (15,000원)
+                
+                if current_krw < min_required_cash:
+                    print(f"  🚨 현금 절대 부족 ({current_krw:,.0f}원 < {min_required_cash:,.0f}원) - 매수 중단")
+                    print(f"     💡 현재 현금 비중: {cash_ratio:.1%} (권장: 20% 이상)")
+                    logging.info(f"BUY_SKIP - {coin}: 현금 절대 부족 ({current_krw:,.0f}원)")
+                    continue
+                
+                # 현금 비중 15% 미만일 때만 경고 (차단하지 않음)
+                if cash_ratio < 0.15:
+                    print(f"  ⚠️ 주의: 현금 비중 낮음 ({cash_ratio:.1%}) - 다음 사이클 리밸런싱 예정")
+                elif cash_ratio < 0.20:
+                    print(f"  📊 현금 비중: {cash_ratio:.1%} (권장: 20% 이상)")
+                
                 # 현금 부족 시 매수 제한
                 if current_krw < MIN_TRADE_AMOUNT * 2:  # 최소 거래금액의 2배 미만 시
                     print(f"  ⚠️ 현금 부족으로 매수 제한: {current_krw:,.0f}원")
@@ -1222,20 +1462,52 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 final_ratio = min(ai_size_ratio, dynamic_ratio * multiplier)
                 trade_amount = current_krw * final_ratio * 0.9995  # 수수료 고려
                 
-                # 최대 투자 한도 체크 (총 자산의 85%까지만)
-                total_portfolio = get_current_portfolio_snapshot(upbit)
-                total_value = total_portfolio.get('total_value', 0)
-                krw_ratio = current_krw / total_value if total_value > 0 else 1
+                # 최대 투자 한도 체크 (총 자산의 85%까지만) - 예외 처리 강화
+                try:
+                    total_portfolio = get_current_portfolio_snapshot(upbit)
+                    total_value = total_portfolio.get('total_value', 0)
+                except Exception as e:
+                    logging.warning(f"포트폴리오 스냅샷 조회 실패 (간단 추정 사용): {e}")
+                    # 현금 기반 간단 추정: 현금 / 최소현금비율 = 전체 포트폴리오 추정
+                    total_value = current_krw / MIN_CASH_RATIO if current_krw > 0 else current_total_value
                 
-                if krw_ratio < MIN_CASH_RATIO:  # 현금이 설정 비율 미만이면 매수 제한
+                krw_ratio = current_krw / total_value if total_value > 0 else 1
+                cash_ratio_for_check = current_krw / total_value if total_value > 0 else 0
+                
+                # 🔴 강제 매수 모드에서는 현금 비율 체크 건너뛰기
+                if cash_ratio_for_check <= 0.40 and krw_ratio < MIN_CASH_RATIO:  # 강제 매수 아닐 때만 체크
                     print(f"  ⚠️ 현금 비율 부족으로 매수 제한: {krw_ratio:.1%}")
                     continue
                 
-                current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['ask_price']
+                # 안전한 매수 가격 조회 (재시도 로직 추가)
+                buy_orderbook = None
+                for retry in range(3):
+                    try:
+                        buy_orderbook = pyupbit.get_orderbook(ticker=ticker)
+                        if buy_orderbook and isinstance(buy_orderbook, dict) and 'orderbook_units' in buy_orderbook and buy_orderbook['orderbook_units']:
+                            break
+                    except (KeyError, TypeError, Exception) as e:
+                        print(f"  ⚠️ {coin} 호가 조회 실패 (시도 {retry+1}/3): {e}")
+                        time.sleep(1)
+                
+                if not buy_orderbook or not isinstance(buy_orderbook, dict) or 'orderbook_units' not in buy_orderbook or not buy_orderbook['orderbook_units']:
+                    print(f"  ⚠️ {coin} 호가 정보 없음 - 매수 건너뜀")
+                    logging.warning(f"BUY_SKIP - {coin}: 호가 정보 없음")
+                    continue
+                    
+                current_price = buy_orderbook['orderbook_units'][0]['ask_price']
                 
                 if trade_amount > MIN_TRADE_AMOUNT:  # 최소 거래 금액
                     result = upbit.buy_market_order(ticker, trade_amount)
                     if result:
+                        log_decision('BUY', coin, True, '매수 완료', {
+                            'trade_amount': f"{trade_amount:,.0f}원",
+                            'ai_size_ratio': f"{ai_size_ratio:.1%}",
+                            'confidence': f"{confidence:.1%}",
+                            'signal': signal,
+                            'current_allocation': f"{current_allocation:.1%}",
+                            'cash_ratio': f"{cash_ratio:.1%}"
+                        })
                         message = f"{coin} 매수 완료: {trade_amount:,.0f}원 (AI추천: {ai_size_ratio:.1%}) | 신뢰도: {confidence:.1%}"
                         print(f"  ✅ {message}")
                         logging.info(f"BUY - {message}")
@@ -1281,6 +1553,55 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                     print(f"  ⏸️  매수 금액 부족 ({trade_amount:,.0f}원 < {MIN_TRADE_AMOUNT:,}원)")
                     
             elif signal == 'SELL':
+                # 🔴 매일 자정에 SELL 카운트 리셋
+                global last_reset_date, daily_sell_count
+                today = datetime.now().date()
+                if last_reset_date != today:
+                    daily_sell_count = {}
+                    last_reset_date = today
+                
+                # 🔴 같은 코인 하루 1회 SELL 제한 (손절매/고신뢰도 예외)
+                if daily_sell_count.get(coin, 0) >= 1:
+                    # 현재 손실률 계산
+                    try:
+                        avg_buy_price = upbit.get_avg_buy_price(ticker)
+                        current_price_data = pyupbit.get_orderbook(ticker=ticker)
+                        if current_price_data and 'orderbook_units' in current_price_data and current_price_data['orderbook_units']:
+                            current_price = current_price_data['orderbook_units'][0]['bid_price']
+                            loss_rate = ((avg_buy_price - current_price) / avg_buy_price) if avg_buy_price > 0 else 0
+                        else:
+                            loss_rate = 0
+                    except Exception as e:
+                        logging.warning(f"손실률 계산 실패: {e}")
+                        loss_rate = 0
+                    
+                    is_stop_loss = loss_rate >= 0.15  # -15% 이상 손실
+                    is_high_confidence = confidence >= 0.8  # 80% 이상 고신뢰도
+                    
+                    if is_stop_loss:
+                        log_decision('SELL', coin, True, '손절매 예외 (일별 제한 무시)', {
+                            'loss_rate': f"{loss_rate*100:.1f}%",
+                            'daily_sell_count': daily_sell_count[coin],
+                            'avg_buy_price': avg_buy_price,
+                            'current_price': current_price,
+                            'confidence': f"{confidence:.1%}",
+                            'signal': signal
+                        })
+                    elif is_high_confidence:
+                        log_decision('SELL', coin, True, '고신뢰도 예외 (일별 제한 무시)', {
+                            'confidence': f"{confidence:.1%}",
+                            'daily_sell_count': daily_sell_count[coin],
+                            'signal': signal
+                        })
+                    else:
+                        log_decision('SELL', coin, False, '일별 매도 제한', {
+                            'daily_sell_count': f"{daily_sell_count[coin]}/1",
+                            'confidence': f"{confidence:.1%}",
+                            'loss_rate': f"{loss_rate*100:.1f}%",
+                            'signal': signal
+                        })
+                        continue
+                
                 # 연속 매도 제한: 최근 5회 중 4회 이상 매도면 건너뜀
                 if recent_signals[coin].count('SELL') >= 4:
                     print(f"  ⏸️ {coin} 최근 5회 중 3회 이상 매도 - 매도 제한")
@@ -1374,10 +1695,46 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 
                 # 부분 매도 실행 (RSI 80+ 구간) - 상세 로깅 추가
                 if sell_executed:
+                    # 🔴 부분매도 쿨다운 체크 (6시간)
+                    PARTIAL_SELL_COOLDOWN = 6 * 60 * 60  # 6시간
+                    current_time = time.time()
+                    
+                    if coin in last_partial_sell_time:
+                        time_since_last = current_time - last_partial_sell_time[coin]
+                        if time_since_last < PARTIAL_SELL_COOLDOWN:
+                            hours_remaining = (PARTIAL_SELL_COOLDOWN - time_since_last) / 3600
+                            log_decision('PARTIAL_SELL', coin, False, '부분매도 쿨다운', {
+                                'time_since_last': f"{time_since_last/3600:.1f}시간",
+                                'cooldown_remaining': f"{hours_remaining:.1f}시간",
+                                'rsi': f"{rsi:.1f}",
+                                'planned_sell_ratio': f"{sell_ratio:.0%}",
+                                'trend': trend,
+                                'change_rate': f"{change_rate:.1f}%",
+                                'volume_ratio': f"{volume_ratio:.1f}배"
+                            })
+                            continue
+                    
                     current_balance = upbit.get_balance(ticker)
                     if current_balance > 0:
                         sell_amount = current_balance * sell_ratio
-                        current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['bid_price']
+                        
+                        # 안전한 부분 매도 가격 조회 (재시도 로직 추가)
+                        partial_sell_orderbook = None
+                        for retry in range(3):
+                            try:
+                                partial_sell_orderbook = pyupbit.get_orderbook(ticker=ticker)
+                                if partial_sell_orderbook and isinstance(partial_sell_orderbook, dict) and 'orderbook_units' in partial_sell_orderbook and partial_sell_orderbook['orderbook_units']:
+                                    break
+                            except (KeyError, TypeError, Exception) as e:
+                                print(f"  ⚠️ {coin} 부분매도 호가 조회 실패 (시도 {retry+1}/3): {e}")
+                                time.sleep(1)
+                        
+                        if not partial_sell_orderbook or not isinstance(partial_sell_orderbook, dict) or 'orderbook_units' not in partial_sell_orderbook or not partial_sell_orderbook['orderbook_units']:
+                            print(f"  ⚠️ {coin} 호가 정보 없음 - 부분 매도 건너뜀")
+                            logging.warning(f"PARTIAL_SELL_SKIP - {coin}: 호가 정보 없음")
+                            continue
+                            
+                        current_price = partial_sell_orderbook['orderbook_units'][0]['bid_price']
                         sell_value = sell_amount * current_price
                         
                         if sell_value > MIN_TRADE_AMOUNT:
@@ -1389,9 +1746,22 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                             result = upbit.sell_market_order(ticker, sell_amount)
                             if result:
                                 remaining = current_balance - sell_amount
+                                log_decision('PARTIAL_SELL', coin, True, '부분매도 완료', {
+                                    'rsi': f"{rsi:.1f}",
+                                    'sell_amount': f"{sell_amount:.6f}",
+                                    'sell_ratio': f"{sell_ratio:.0%}",
+                                    'remaining': f"{remaining:.6f}",
+                                    'trend': trend,
+                                    'change_rate': f"{change_rate:.1f}%",
+                                    'volume_ratio': f"{volume_ratio:.1f}배",
+                                    'current_price': current_price
+                                })
                                 message = f"{coin} 부분 매도 완료: {sell_amount:.6f} ({sell_ratio:.0%}) | RSI: {rsi:.1f} | 잔여: {remaining:.6f}"
                                 print(f"  ✅ {message}")
                                 logging.info(f"PARTIAL_SELL_SUCCESS - {message}")
+                                
+                                # 🔴 부분매도 쿨다운 시간 기록
+                                last_partial_sell_time[coin] = time.time()
                             else:
                                 print(f"  ❌ {coin} 부분 매도 실패")
                                 logging.error(f"PARTIAL_SELL_FAILED - {coin} | RSI: {rsi:.1f}")
@@ -1422,16 +1792,41 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                     sell_ratio = confidence if confidence > 0.6 else 0.3
                     sell_amount = current_balance * sell_ratio
                     
-                    # 최소 거래 금액 확인
-                    current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['ask_price']
+                    # 안전한 매도 가격 조회 (재시도 로직 추가)
+                    sell_orderbook = None
+                    for retry in range(3):
+                        try:
+                            sell_orderbook = pyupbit.get_orderbook(ticker=ticker)
+                            if sell_orderbook and isinstance(sell_orderbook, dict) and 'orderbook_units' in sell_orderbook and sell_orderbook['orderbook_units']:
+                                break
+                        except (KeyError, TypeError, Exception) as e:
+                            print(f"  ⚠️ {coin} 매도 호가 조회 실패 (시도 {retry+1}/3): {e}")
+                            time.sleep(1)
+                    
+                    if not sell_orderbook or not isinstance(sell_orderbook, dict) or 'orderbook_units' not in sell_orderbook or not sell_orderbook['orderbook_units']:
+                        print(f"  ⚠️ {coin} 호가 정보 없음 - 매도 건너뜀")
+                        logging.warning(f"SELL_SKIP - {coin}: 호가 정보 없음")
+                        continue
+                        
+                    current_price = sell_orderbook['orderbook_units'][0]['bid_price']
                     sell_value = sell_amount * current_price
                     
                     if sell_value > MIN_TRADE_AMOUNT:
                         result = upbit.sell_market_order(ticker, sell_amount)
                         if result:
+                            log_decision('SELL', coin, True, '매도 완료', {
+                                'sell_amount': f"{sell_amount:.6f}",
+                                'sell_ratio': f"{sell_ratio:.1%}",
+                                'confidence': f"{confidence:.1%}",
+                                'daily_sell_count': daily_sell_count.get(coin, 0) + 1,
+                                'current_price': current_price
+                            })
                             message = f"{coin} 매도 완료: {sell_amount:.6f} ({sell_ratio:.1%}) | 신뢰도: {confidence:.1%}"
                             print(f"  ✅ {message}")
                             logging.info(f"SELL - {message}")
+                            
+                            # 🔴 일일 SELL 카운트 증가
+                            daily_sell_count[coin] = daily_sell_count.get(coin, 0) + 1
                             
                             # 거래 후 포트폴리오 스냅샷
                             portfolio_after = {}
@@ -1483,16 +1878,38 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 
                 # 강한 상승 추세 + HOLD 신호 + 낮은 보유 비중 → 매수 고려
                 current_coin_balance = upbit.get_balance(ticker)
-                current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['ask_price']
+                
+                # 안전한 가격 조회 (재시도 로직 추가)
+                hold_orderbook = None
+                for retry in range(3):
+                    try:
+                        hold_orderbook = pyupbit.get_orderbook(ticker=ticker)
+                        if hold_orderbook and isinstance(hold_orderbook, dict) and 'orderbook_units' in hold_orderbook and hold_orderbook['orderbook_units']:
+                            break
+                    except (KeyError, TypeError, Exception) as e:
+                        print(f"  ⚠️ {coin} HOLD 호가 조회 실패 (시도 {retry+1}/3): {e}")
+                        time.sleep(1)
+                
+                if not hold_orderbook or not isinstance(hold_orderbook, dict) or 'orderbook_units' not in hold_orderbook or not hold_orderbook['orderbook_units']:
+                    print(f"  ⏸️  보유 (호가 정보 없음)")
+                    continue
+                    
+                current_price = hold_orderbook['orderbook_units'][0]['ask_price']
                 current_coin_value = current_coin_balance * current_price if current_coin_balance > 0 else 0
                 
+                # 전체 포트폴리오 가치 계산 (KRW + 모든 코인) - 정확한 비중 계산, 개별 예외 처리
                 total_value = upbit.get_balance("KRW")
                 for other_ticker in PORTFOLIO_COINS:
-                    if other_ticker != ticker:
+                    try:
                         other_balance = upbit.get_balance(other_ticker)
                         if other_balance > 0:
-                            other_price = pyupbit.get_orderbook(ticker=other_ticker)['orderbook_units'][0]['ask_price']
-                            total_value += other_balance * other_price
+                            other_orderbook = pyupbit.get_orderbook(ticker=other_ticker)
+                            if other_orderbook and 'orderbook_units' in other_orderbook and other_orderbook['orderbook_units']:
+                                other_price = other_orderbook['orderbook_units'][0]['ask_price']
+                                total_value += other_balance * other_price
+                    except Exception as e:
+                        logging.debug(f"{other_ticker} HOLD 비중 조회 실패 (무시): {e}")
+                        continue
                 
                 current_coin_ratio = current_coin_value / total_value if total_value > 0 else 0
                 
@@ -1519,6 +1936,9 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 
         except Exception as e:
             print(f"  ❌ {coin} 거래 오류: {e}")
+            logging.error(f"TRADE_ERROR - {coin}: {type(e).__name__} - {str(e)}")
+            import traceback
+            logging.error(f"상세 오류:\n{traceback.format_exc()}")  # DEBUG → ERROR로 변경
     
     print(f"\n✅ 포트폴리오 매매 실행 완료")
 
@@ -1722,7 +2142,11 @@ def load_config():
 
 def setup_logging():
     """로깅 시스템 설정"""
-    log_filename = f"trading_bot_{datetime.now().strftime('%Y%m%d')}.log"
+    # log 폴더 생성
+    log_dir = "log"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    log_filename = os.path.join(log_dir, f"trading_bot_{datetime.now().strftime('%Y%m%d')}.log")
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -1735,24 +2159,37 @@ def setup_logging():
 
 def setup_detailed_logging():
     """실제 투자 데이터 수집용 상세 로깅 시스템 설정"""
+    # log 폴더 생성
+    log_dir = "log"
+    os.makedirs(log_dir, exist_ok=True)
+    
     # 상세 거래 로그
     trade_logger = logging.getLogger('trade_logger')
     trade_logger.setLevel(logging.INFO)
-    trade_handler = logging.FileHandler(f'trades_{datetime.now().strftime("%Y%m%d")}.json', encoding='utf-8')
+    trade_handler = logging.FileHandler(
+        os.path.join(log_dir, f'trades_{datetime.now().strftime("%Y%m%d")}.json'), 
+        encoding='utf-8'
+    )
     trade_handler.setFormatter(logging.Formatter('%(message)s'))
     trade_logger.addHandler(trade_handler)
     
     # AI 신호 로그
     signal_logger = logging.getLogger('signal_logger')
     signal_logger.setLevel(logging.INFO)
-    signal_handler = logging.FileHandler(f'ai_signals_{datetime.now().strftime("%Y%m%d")}.json', encoding='utf-8')
+    signal_handler = logging.FileHandler(
+        os.path.join(log_dir, f'ai_signals_{datetime.now().strftime("%Y%m%d")}.json'), 
+        encoding='utf-8'
+    )
     signal_handler.setFormatter(logging.Formatter('%(message)s'))
     signal_logger.addHandler(signal_handler)
     
     # 성과 로그
     performance_logger = logging.getLogger('performance_logger')
     performance_logger.setLevel(logging.INFO)
-    performance_handler = logging.FileHandler(f'performance_{datetime.now().strftime("%Y%m%d")}.json', encoding='utf-8')
+    performance_handler = logging.FileHandler(
+        os.path.join(log_dir, f'performance_{datetime.now().strftime("%Y%m%d")}.json'), 
+        encoding='utf-8'
+    )
     performance_handler.setFormatter(logging.Formatter('%(message)s'))
     performance_logger.addHandler(performance_handler)
     

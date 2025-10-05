@@ -17,9 +17,20 @@ echo "   백업 위치: ${BACKUP_DIR}"
 # 백업 디렉토리 생성
 mkdir -p "${BACKUP_DIR}"
 
-# 백업할 파일들 (있는 경우에만)
+# log 폴더의 파일들 백업
+if [ -d "log" ]; then
+    echo "   - log 폴더 백업 중..."
+    if [ "$(ls -A log)" ]; then
+        cp -r log/* "${BACKUP_DIR}/" 2>/dev/null || true
+        # log 폴더의 모든 파일 삭제 (깨끗하게 시작)
+        echo "   - log 폴더 정리 중..."
+        rm -f log/*.log log/*.json 2>/dev/null || true
+    fi
+fi
+
+# 루트 폴더에 남아있는 로그 파일들도 백업 (혹시 몰라서)
 if ls *.log 1> /dev/null 2>&1; then
-    echo "   - 로그 파일 백업 중..."
+    echo "   - 루트 폴더 로그 파일 백업 중..."
     mv *.log "${BACKUP_DIR}/" 2>/dev/null || true
 fi
 
@@ -42,6 +53,9 @@ if [ -f news_cache.json ]; then
     echo "   - 뉴스 캐시 백업 중..."
     mv news_cache.json "${BACKUP_DIR}/" 2>/dev/null || true
 fi
+
+# log 폴더가 없으면 생성
+mkdir -p log
 
 echo ""
 echo "✅ 백업 완료!"
@@ -111,7 +125,8 @@ echo ""
 echo "========================================="
 echo ""
 echo "💡 팁:"
-echo "   - 로그는 실시간으로 trading_bot_YYYYMMDD.log에 기록됩니다"
+echo "   - 로그는 log/trading_bot_YYYYMMDD.log에 기록됩니다"
+echo "   - 거래 데이터는 log/ 폴더에서 확인할 수 있습니다"
 echo "   - Ctrl+C로 안전하게 중단할 수 있습니다"
 echo "   - 이전 데이터는 ${BACKUP_DIR}에 보관됩니다"
 echo ""
