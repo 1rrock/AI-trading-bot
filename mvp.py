@@ -1352,6 +1352,22 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                         logging.info(f"BUY_SKIP - {coin}: 집중도 초과, 분산 매수 불가 (현금 유지)")
                         continue
                 
+                # 🔴 현재 KRW 잔고 및 총 자산 가져오기 (연속 매수 제한 체크에 필요)
+                current_krw = upbit.get_balance("KRW")
+                balances = upbit.get_balances()
+                total_value = current_krw
+                for balance in balances:
+                    if balance['currency'] != 'KRW':
+                        ticker_temp = f"KRW-{balance['currency']}"
+                        try:
+                            current_price_temp = pyupbit.get_current_price(ticker_temp)
+                            if current_price_temp:
+                                total_value += float(balance['balance']) * current_price_temp
+                        except Exception as e:
+                            # 거래되지 않는 코인은 무시하고 계속 진행
+                            logging.debug(f"{ticker_temp} 가격 조회 실패 (무시): {e}")
+                            continue
+                
                 # 🔴 비중 기반 매수 제한 (악순환 방지)
                 current_allocation = portfolio_summary.get('portfolio_allocation', {}).get(coin, 0)
                 if current_allocation > MAX_SINGLE_COIN_RATIO * 0.8:  # 35%의 80% = 28%
@@ -1602,9 +1618,25 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                         })
                         continue
                 
-                # 연속 매도 제한: 최근 5회 중 4회 이상 매도면 건너뜀
-                if recent_signals[coin].count('SELL') >= 4:
-                    print(f"  ⏸️ {coin} 최근 5회 중 3회 이상 매도 - 매도 제한")
+                # 🔴 보유 중인 코인만 매도 제한 체크 (보유하지 않은 코인은 SELL 신호를 받아도 거래 안 되므로 제한 불필요)
+                current_coin_balance = upbit.get_balance(ticker)
+                if current_coin_balance > 0:
+                    # 연속 매도 제한: 최근 5회 중 4회 이상 매도면 건너뜀
+                    if recent_signals[coin].count('SELL') >= 4:
+                        log_decision('SELL', coin, False, '연속 매도 제한 (최근 5회 중 4회 이상)', {
+                            'recent_signals': recent_signals[coin],
+                            'current_balance': f"{current_coin_balance:.8f}",
+                            'confidence': f"{confidence:.1%}",
+                            'signal': signal
+                        })
+                        continue
+                else:
+                    # 보유하지 않은 코인 - SELL 신호 무시
+                    log_decision('SELL', coin, False, '보유량 없음 (매도 불가)', {
+                        'current_balance': '0',
+                        'confidence': f"{confidence:.1%}",
+                        'signal': signal
+                    })
                     continue
                 
                 # �️ 보수적 강화: RSI 구간별 차등 적용 + 거래량 검증
