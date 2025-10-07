@@ -1,3 +1,11 @@
+"""
+AI 포트폴리오 트레이딩 봇 v2.0
+- 다중 타임프레임 분석
+- 뉴스 감정 분석 통합
+- 동적 리스크 관리
+- 모듈화 구조
+"""
+
 import os
 from dotenv import load_dotenv
 import pyupbit
@@ -10,36 +18,35 @@ import logging
 from datetime import datetime, timedelta
 import numpy as np
 
-# === 거래 쿨다운 추적 (전역 변수) ===
+# ============================================================================
+# 모듈 임포트
+# ============================================================================
+
+# === 유틸리티 모듈 ===
+from utils.api_helpers import get_safe_orderbook, get_total_portfolio_value
+from utils.logger import log_decision
+
+# === 데이터 수집 모듈 ===
+from data.market_data import get_portfolio_data, calculate_rsi, get_fear_greed_index
+from data.news_collector import get_news_headlines, get_free_crypto_news, analyze_news_sentiment
+
+# === 분석 모듈 ===
+from analysis.portfolio_analyzer import analyze_multi_timeframe, calculate_trend_alignment, make_portfolio_summary
+from analysis.market_condition import analyze_market_condition, detect_bear_market
+
+# ============================================================================
+# 전역 변수 및 상태 관리
+# ============================================================================
+
+# === 거래 쿨다운 추적 ===
 last_partial_sell_time = {}  # 부분매도 쿨다운
 daily_sell_count = {}  # 일별 매도 횟수
 last_reset_date = None  # 마지막 리셋 날짜
 last_rebalance_time = {}  # 리밸런싱 쿨다운 (악순환 방지)
 
-# === 의사결정 로깅 강화 (디버깅용) ===
-def log_decision(action: str, coin: str, allowed: bool, reason: str, context: dict):
-    """
-    거래 의사결정을 상세하게 로깅
-    
-    Args:
-        action: 'BUY', 'SELL', 'PARTIAL_SELL', 'REBALANCE' 등
-        coin: 코인 심볼
-        allowed: 허용 여부 (True/False)
-        reason: 결정 이유
-        context: 추가 컨텍스트 정보
-    """
-    status = "✅ 허용" if allowed else "❌ 거부"
-    
-    # 콘솔 출력 (간략)
-    if not allowed:
-        print(f"  {status} {coin} {action}: {reason}")
-    
-    # 로그 파일 출력 (상세)
-    logging.info(f"===== {action} 의사결정: {coin} =====")
-    logging.info(f"결과: {status}")
-    logging.info(f"이유: {reason}")
-    logging.info(f"컨텍스트: {json.dumps(context, ensure_ascii=False, indent=2)}")
-    logging.info("=" * 60)
+# ============================================================================
+# 설정 로드
+# ============================================================================
 
 # === 설정 로드 ===
 def load_config():
@@ -96,6 +103,7 @@ BULL_MARKET_THRESHOLD = CONFIG["market_conditions"]["bull_market_threshold"]
 BEAR_MARKET_THRESHOLD = CONFIG["market_conditions"]["bear_market_threshold"]
 MIN_CASH_RATIO = CONFIG["safety"]["min_cash_ratio"]
 MAX_PORTFOLIO_CONCENTRATION = CONFIG["safety"]["max_portfolio_concentration"]
+BEAR_MARKET_CASH_RATIO = CONFIG["safety"].get("bear_market_cash_ratio", 0.50)  # 약세장 현금 비율
 
 # 리스크 관리 승수 (config에서 추출)
 BULL_MARKET_MULTIPLIER = CONFIG["risk_management"]["bull_market_multiplier"]
@@ -115,431 +123,9 @@ CHECK_INTERVALS = CONFIG["check_intervals"]
 HIGH_VOLATILITY_THRESHOLD = CONFIG["market_conditions"]["high_volatility_threshold"]
 
 
-
-def get_portfolio_data():
-    """4개 코인 포트폴리오 데이터 수집 - 다중 타임프레임"""
-    portfolio_data = {}
-    
-    timeframes = {
-        'day': DATA_PERIOD,      # 일봉 30일
-        'hour4': 168,           # 4시간봉 1주일 (168시간)
-        'hour1': 168            # 1시간봉 1주일
-    }
-    
-    for ticker in PORTFOLIO_COINS:
-        try:
-            coin_name = ticker.split('-')[1]
-            portfolio_data[coin_name] = {}
-            
-            for tf, count in timeframes.items():
-                interval = tf.replace('hour', '')  # 'hour4' -> '4', 'hour1' -> '1'
-                if tf == 'day':
-                    interval = 'day'
-                elif tf == 'hour4':
-                    interval = 'minute240'  # 4시간 = 240분
-                elif tf == 'hour1':
-                    interval = 'minute60'   # 1시간 = 60분
-                
-                df = pyupbit.get_ohlcv(ticker, interval=interval, count=count)
-                if df is not None:
-                    portfolio_data[coin_name][tf] = df
-                else:
-                    print(f"❌ {ticker} {tf} 데이터 수집 실패")
-            
-            if portfolio_data[coin_name]:
-                print(f"✅ {coin_name} 다중 타임프레임 데이터 수집 완료")
-            
-        except Exception as e:
-            print(f"❌ {ticker} 오류: {e}")
-    
-    return portfolio_data
-
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def get_fear_greed_index():
-    try:
-        resp = requests.get("https://api.alternative.me/fng/?limit=1")
-        data = resp.json()
-        return {
-            "value": data['data'][0]['value'],
-            "text": data['data'][0]['value_classification']
-        }
-    except Exception as e:
-        return {"value": None, "text": None}
-
-def get_news_headlines():
-    try:
-        # 캐시 파일이 있으면, 4시간 이내면 캐시 데이터 반환
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r") as f:
-                cache = json.load(f)
-            if time.time() - cache["timestamp"] < CACHE_DURATION:
-                return cache["data"]
-        # API 호출 및 캐시 저장
-        news_api_key = os.getenv("NEWS_API_KEY")
-        if not news_api_key:
-            print("⚠️ 뉴스 API 키가 없어 뉴스 수집을 건너뜁니다.")
-            return []
-        
-        # 포트폴리오 코인들의 뉴스 수집
-        all_headlines = []
-        coin_names = []
-        
-        # 포트폴리오 코인 이름 추출 및 검색 키워드 생성
-        for ticker in PORTFOLIO_COINS:
-            coin_name = ticker.split('-')[1].lower()
-            if coin_name == 'btc':
-                coin_names.extend(['bitcoin', 'btc'])
-            elif coin_name == 'eth':
-                coin_names.extend(['ethereum', 'eth'])
-            elif coin_name == 'sol':
-                coin_names.extend(['solana', 'sol'])
-            elif coin_name == 'xrp':
-                coin_names.extend(['ripple', 'xrp'])
-            else:
-                coin_names.append(coin_name)
-        
-        # 각 코인에 대해 뉴스 검색 (API 제한을 고려하여 한 번에 여러 키워드로 검색)
-        search_query = " OR ".join(coin_names[:10])  # API 제한 고려하여 최대 10개 키워드
-        
-        resp = requests.get(f"https://newsdata.io/api/1/latest?apikey={news_api_key}&q={search_query}")
-        data = resp.json()
-        
-        if data.get('results'):
-            for item in data['results']:
-                headline = item.get('title', '')
-                if headline:
-                    all_headlines.append(headline)
-        
-        # 중복 제거 및 관련성 높은 뉴스만 필터링
-        unique_headlines = list(dict.fromkeys(all_headlines))  # 중복 제거
-        
-        with open(CACHE_FILE, "w") as f:
-            json.dump({"timestamp": time.time(), "data": unique_headlines}, f)
-        
-        print(f"📰 포트폴리오 코인 뉴스 수집: {len(unique_headlines)}개")
-        return unique_headlines
-        
-    except Exception as e:
-        logging.error(f"뉴스 수집 실패: {e}")
-        return get_free_crypto_news()
-
-def get_free_crypto_news():
-    """무료 암호화폐 뉴스 소스 (Reddit 기반) - 포트폴리오 코인 중심"""
-    try:
-        url = "https://www.reddit.com/r/CryptoCurrency/hot.json?limit=25"
-        headers = {'User-Agent': 'AI-Trading-Bot/1.0'}
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        headlines = []
-        
-        # 포트폴리오 코인 키워드 정의
-        portfolio_keywords = {
-            'bitcoin': ['bitcoin', 'btc', 'Bitcoin', 'BTC'],
-            'ethereum': ['ethereum', 'eth', 'Ethereum', 'ETH'],
-            'solana': ['solana', 'sol', 'Solana', 'SOL'],
-            'ripple': ['ripple', 'xrp', 'Ripple', 'XRP']
-        }
-        
-        if 'data' in data and 'children' in data['data']:
-            for post in data['data']['children']:
-                title = post['data']['title']
-                score = post['data']['score']
-                
-                if score > 3:  # 점수 기준 낮춤 (더 많은 뉴스 수집)
-                    # 포트폴리오 코인 관련 뉴스인지 확인
-                    is_relevant = False
-                    for coin, keywords in portfolio_keywords.items():
-                        if any(keyword in title for keyword in keywords):
-                            is_relevant = True
-                            break
-                    
-                    # 일반적인 암호화폐 뉴스도 포함
-                    general_crypto_keywords = ['crypto', 'cryptocurrency', 'blockchain', 'DeFi', 'NFT', 'altcoin', 'bull', 'bear', 'pump', 'dump']
-                    if not is_relevant:
-                        is_relevant = any(keyword.lower() in title.lower() for keyword in general_crypto_keywords)
-                    
-                    if is_relevant:
-                        headlines.append(title)
-        
-        print(f"📰 Reddit 뉴스 수집: {len(headlines)}개 (포트폴리오 코인 중심)")
-        return headlines[:15]  # 상위 15개로 증가
-        
-    except Exception as e:
-        logging.warning(f"무료 뉴스 수집 실패: {e}")
-        return []
-
-def analyze_news_sentiment(headlines):
-    """뉴스 감정 분석 및 긴급 이벤트 감지 - 포트폴리오 코인 특화"""
-    if not headlines:
-        return {"sentiment": "neutral", "emergency": False, "events": []}
-    
-    # 긴급 키워드 정의 (포트폴리오 코인 추가)
-    emergency_negative = ["hack", "hacked", "stolen", "exploit", "attack", "collapse", "bankrupt", "scam", "rugpull", "crash", "dump"]
-    emergency_positive = ["ETF approved", "approved", "institutional", "Tesla", "Microsoft", "MicroStrategy", "adoption", "pump", "moon", "breakthrough"]
-    regulatory_risk = ["SEC", "ban", "illegal", "lawsuit", "investigation", "probe", "fine", "regulatory"]
-    
-    # 포트폴리오 코인별 특별 이벤트
-    coin_specific_positive = {
-        'bitcoin': ['halving', 'mining', 'store of value', 'digital gold'],
-        'ethereum': ['merge', 'staking', 'defi', 'smart contract', 'gas fee reduction'],
-        'solana': ['fast transaction', 'ecosystem growth', 'nft', 'validator'],
-        'ripple': ['payment', 'bank partnership', 'cross border', 'legal victory']
-    }
-    
-    coin_specific_negative = {
-        'bitcoin': ['energy consumption', 'mining ban'],
-        'ethereum': ['gas fee', 'scalability issue'],
-        'solana': ['network outage', 'downtime'],
-        'ripple': ['sec lawsuit', 'delisting']
-    }
-    
-    sentiment_score = 0
-    emergency_events = []
-    coin_mentions = {'bitcoin': 0, 'ethereum': 0, 'solana': 0, 'ripple': 0}
-    
-    for headline in headlines:
-        headline_lower = headline.lower()
-        
-        # 긴급 부정 이벤트
-        for keyword in emergency_negative:
-            if keyword in headline_lower:
-                sentiment_score -= 3
-                emergency_events.append(f"🚨 위험: {keyword}")
-        
-        # 긴급 긍정 이벤트  
-        for keyword in emergency_positive:
-            if keyword in headline_lower:
-                sentiment_score += 2
-                emergency_events.append(f"🚀 호재: {keyword}")
-        
-        # 규제 리스크
-        for keyword in regulatory_risk:
-            if keyword in headline_lower:
-                sentiment_score -= 1
-                emergency_events.append(f"⚖️ 규제: {keyword}")
-        
-        # 포트폴리오 코인별 특별 이벤트 분석
-        for coin, positive_keywords in coin_specific_positive.items():
-            if any(kw in headline_lower for kw in positive_keywords):
-                sentiment_score += 1
-                coin_mentions[coin] += 1
-                emergency_events.append(f"💎 {coin.upper()} 호재")
-        
-        for coin, negative_keywords in coin_specific_negative.items():
-            if any(kw in headline_lower for kw in negative_keywords):
-                sentiment_score -= 1
-                coin_mentions[coin] += 1
-                emergency_events.append(f"⚠️ {coin.upper()} 악재")
-        
-        # 일반적인 코인 언급 체크
-        coin_keywords = {
-            'bitcoin': ['bitcoin', 'btc'],
-            'ethereum': ['ethereum', 'eth'],
-            'solana': ['solana', 'sol'],
-            'ripple': ['ripple', 'xrp']
-        }
-        
-        for coin, keywords in coin_keywords.items():
-            if any(kw in headline_lower for kw in keywords):
-                coin_mentions[coin] += 1
-    
-    # 감정 분류
-    if sentiment_score >= 4:
-        sentiment = "very_bullish"
-    elif sentiment_score >= 2:
-        sentiment = "bullish"
-    elif sentiment_score <= -4:
-        sentiment = "very_bearish"
-    elif sentiment_score <= -2:
-        sentiment = "bearish"
-    else:
-        sentiment = "neutral"
-    
-    # 가장 많이 언급된 코인 정보 추가
-    most_mentioned_coin = max(coin_mentions, key=coin_mentions.get) if max(coin_mentions.values()) > 0 else None
-    
-    return {
-        "sentiment": sentiment,
-        "score": sentiment_score,
-        "emergency": abs(sentiment_score) >= 3,
-        "events": emergency_events[:5],  # 상위 5개로 증가
-        "coin_mentions": coin_mentions,
-        "focus_coin": most_mentioned_coin
-    }
-
-
-
-def analyze_multi_timeframe(coin_data):
-    """다중 타임프레임 종합 분석"""
-    analysis = {}
-    
-    for timeframe, df in coin_data.items():
-        if df is not None and len(df) >= 20:
-            rsi = calculate_rsi(df['close']).iloc[-1]
-            ma5 = df['close'].rolling(window=5).mean().iloc[-1]
-            ma20 = df['close'].rolling(window=20).mean().iloc[-1]
-            
-            # 트렌드 강도 계산
-            trend_strength = "neutral"
-            if ma5 > ma20 * 1.02:  # 2% 이상 차이
-                trend_strength = "strong_bullish"
-            elif ma5 > ma20:
-                trend_strength = "bullish"
-            elif ma5 < ma20 * 0.98:
-                trend_strength = "strong_bearish"
-            elif ma5 < ma20:
-                trend_strength = "bearish"
-            
-            analysis[timeframe] = {
-                "rsi": rsi,
-                "ma5": ma5,
-                "ma20": ma20,
-                "trend_strength": trend_strength,
-                "current_price": df['close'].iloc[-1],
-                "volume_avg": df['volume'][-5:].mean()
-            }
-    
-    return analysis
-
-def make_portfolio_summary(portfolio_data, fng, news):
-    """포트폴리오 전체 요약 생성 - 다중 타임프레임 지원"""
-    portfolio_summary = {
-        "coins": {},
-        "fear_greed_index": fng,
-        "news_headlines": news,
-        "timestamp": time.time()
-    }
-    
-    # 각 코인별 다중 타임프레임 분석
-    for coin, timeframe_data in portfolio_data.items():
-        if not timeframe_data:
-            continue
-            
-        # 일봉 기준 기본 정보
-        day_data = timeframe_data.get('day')
-        if day_data is not None and len(day_data) >= 20:
-            # 다중 타임프레임 분석
-            multi_tf_analysis = analyze_multi_timeframe(timeframe_data)
-            
-            # 트렌드 일치도 계산
-            trend_alignment = calculate_trend_alignment(multi_tf_analysis)
-            
-            portfolio_summary["coins"][coin] = {
-                "current_price": day_data['close'].iloc[-1],
-                "recent_close": day_data['close'][-5:].tolist(),
-                "change_rate": (day_data['close'].iloc[-1] - day_data['close'].iloc[-5]) / day_data['close'].iloc[-5] * 100,
-                "volume": day_data['volume'][-5:].mean(),
-                "multi_timeframe": multi_tf_analysis,
-                "trend_alignment": trend_alignment,
-                # 레거시 호환성
-                "rsi": multi_tf_analysis.get('day', {}).get('rsi', 50),
-                "ma5": multi_tf_analysis.get('day', {}).get('ma5', 0),
-                "ma20": multi_tf_analysis.get('day', {}).get('ma20', 0)
-            }
-    
-    # 전체 시장 상황 분석 추가
-    portfolio_summary["market_condition"] = analyze_market_condition(portfolio_summary)
-    
-    return portfolio_summary
-
-def analyze_market_condition(portfolio_summary):
-    """전체 시장 상황 분석"""
-    if not portfolio_summary.get("coins"):
-        return {"condition": "unknown", "confidence": 0}
-    
-    # 포트폴리오 평균 변화율 계산
-    total_change = 0
-    total_volatility = 0
-    coin_count = 0
-    bullish_coins = 0
-    bearish_coins = 0
-    
-    for coin, data in portfolio_summary["coins"].items():
-        change_rate = data.get("change_rate", 0)
-        total_change += change_rate
-        total_volatility += abs(change_rate)
-        coin_count += 1
-        
-        # 트렌드 정렬 분석
-        alignment = data.get("trend_alignment", "mixed_signals")
-        if "bullish" in alignment:
-            bullish_coins += 1
-        elif "bearish" in alignment:
-            bearish_coins += 1
-    
-    if coin_count == 0:
-        return {"condition": "unknown", "confidence": 0}
-    
-    avg_change = total_change / coin_count
-    avg_volatility = total_volatility / coin_count
-    
-    # 공포탐욕지수 고려
-    fng_value = portfolio_summary.get("fear_greed_index", {}).get("value", 50)
-    
-    # 시장 상황 판단
-    market_condition = "sideways"  # 기본값
-    confidence = 0.5
-    
-    if avg_change > BULL_MARKET_THRESHOLD and bullish_coins > bearish_coins:
-        if fng_value > FEAR_GREED_EXTREME_GREED:
-            market_condition = "bull_market_overheated"
-            confidence = 0.8
-        else:
-            market_condition = "bull_market"
-            confidence = 0.7
-    elif avg_change < BEAR_MARKET_THRESHOLD and bearish_coins > bullish_coins:
-        if fng_value < FEAR_GREED_EXTREME_FEAR:
-            market_condition = "bear_market_oversold"
-            confidence = 0.8
-        else:
-            market_condition = "bear_market"
-            confidence = 0.7
-    elif avg_volatility > HIGH_VOLATILITY_THRESHOLD:
-        market_condition = "high_volatility"
-        confidence = 0.6
-    
-    return {
-        "condition": market_condition,
-        "confidence": confidence,
-        "avg_change": avg_change,
-        "avg_volatility": avg_volatility,
-        "bullish_coins": bullish_coins,
-        "bearish_coins": bearish_coins,
-        "fng_value": fng_value
-    }
-
-def calculate_trend_alignment(multi_tf_analysis):
-    """다중 타임프레임 트렌드 일치도 계산"""
-    bullish_count = 0
-    bearish_count = 0
-    total_timeframes = len(multi_tf_analysis)
-    
-    for tf_name, analysis in multi_tf_analysis.items():
-        trend = analysis.get('trend_strength', 'neutral')
-        if 'bullish' in trend:
-            bullish_count += 2 if 'strong' in trend else 1
-        elif 'bearish' in trend:
-            bearish_count += 2 if 'strong' in trend else 1
-    
-    if bullish_count > bearish_count * 1.5:
-        return "strong_bullish_alignment"
-    elif bullish_count > bearish_count:
-        return "bullish_alignment"
-    elif bearish_count > bullish_count * 1.5:
-        return "strong_bearish_alignment"
-    elif bearish_count > bullish_count:
-        return "bearish_alignment"
-    else:
-        return "mixed_signals"
-
-
+# ============================================================================
+# AI 신호 생성 함수
+# ============================================================================
 
 def get_portfolio_ai_signals(portfolio_summary, max_retries=3):
     """포트폴리오 기반 AI 신호 시스템 - Rate Limiting 포함"""
@@ -684,6 +270,9 @@ def get_portfolio_ai_signals(portfolio_summary, max_retries=3):
                 return default_signals
 
 
+# ============================================================================
+# 리스크 관리 함수
+# ============================================================================
 
 def check_cash_shortage_rebalance(upbit, min_cash_ratio=None):
     """현금 부족 시 자동 리밸런싱 - 15% 미만 시 수익 코인 우선 매도"""
@@ -700,8 +289,9 @@ def check_cash_shortage_rebalance(upbit, min_cash_ratio=None):
             coin = ticker.split('-')[1]
             balance = upbit.get_balance(ticker)
             if balance > 0:
-                orderbook = pyupbit.get_orderbook(ticker=ticker)
-                if not orderbook or 'orderbook_units' not in orderbook or not orderbook['orderbook_units']:
+                # ✨ 헬퍼 함수 사용: 안전한 호가 조회
+                orderbook = get_safe_orderbook(ticker)
+                if not orderbook:
                     continue
                 current_price = orderbook['orderbook_units'][0]['bid_price']
                 avg_buy_price = upbit.get_avg_buy_price(ticker)
@@ -792,8 +382,9 @@ def check_portfolio_concentration_limits(upbit, max_single_position=None):
             coin = ticker.split('-')[1]
             balance = upbit.get_balance(ticker)
             if balance > 0:
-                orderbook = pyupbit.get_orderbook(ticker=ticker)
-                if not orderbook or 'orderbook_units' not in orderbook or not orderbook['orderbook_units']:
+                # ✨ 헬퍼 함수 사용: 안전한 호가 조회
+                orderbook = get_safe_orderbook(ticker)
+                if not orderbook:
                     continue
                 current_price = orderbook['orderbook_units'][0]['bid_price']
                 coin_value = balance * current_price
@@ -854,7 +445,12 @@ def check_portfolio_rebalancing(upbit, deviation_threshold=0.15):
         for ticker in PORTFOLIO_COINS:
             balance = upbit.get_balance(ticker)
             if balance > 0:
-                current_price = pyupbit.get_orderbook(ticker=ticker)['orderbook_units'][0]['bid_price']
+                # ✨ 헬퍼 함수 사용: 안전한 호가 조회
+                orderbook = get_safe_orderbook(ticker)
+                if not orderbook:
+                    current_allocation[ticker] = 0
+                    continue
+                current_price = orderbook['orderbook_units'][0]['bid_price']
                 coin_value = balance * current_price
                 total_portfolio_value += coin_value
                 current_allocation[ticker] = coin_value
@@ -1073,12 +669,17 @@ def calculate_dynamic_position_size(market_condition, base_ratio=BASE_TRADE_RATI
     adjusted_ratio = base_ratio * risk_multiplier * confidence_multiplier
     return min(adjusted_ratio, base_ratio * MAX_POSITION_MULTIPLIER)  # config: 1.5배 상한
 
+
+# ============================================================================
+# 성과 분석 함수
+# ============================================================================
+
 def calculate_performance_metrics(upbit, portfolio_summary):
-    """포트폴리오 성과 지표 계산"""
+    """포트폴리오 성과 지표 계산 (현금 포함 총자산 기준)"""
     try:
         # 현재 보유 자산 조회
         krw_balance = upbit.get_balance("KRW")
-        total_value = krw_balance
+        total_value = krw_balance  # 현금부터 시작
         coin_values = {}
         
         for coin in [c.split('-')[1] for c in PORTFOLIO_COINS]:
@@ -1088,19 +689,19 @@ def calculate_performance_metrics(upbit, portfolio_summary):
             if balance > 0:
                 current_price = portfolio_summary.get("coins", {}).get(coin, {}).get("current_price", 0)
                 coin_value = balance * current_price
-                total_value += coin_value
+                total_value += coin_value  # 총자산에 코인 가치 추가
                 coin_values[coin] = {
                     "balance": balance,
                     "value": coin_value,
                     "percentage": 0  # 나중에 계산
                 }
         
-        # 비중 계산
+        # 비중 계산 (전체 자산 = 현금 + 코인)
         for coin in coin_values:
             coin_values[coin]["percentage"] = coin_values[coin]["value"] / total_value * 100
         
         return {
-            "total_value": total_value,
+            "total_value": total_value,  # 현금 + 코인 합계
             "krw_balance": krw_balance,
             "coin_values": coin_values,
             "krw_percentage": krw_balance / total_value * 100 if total_value > 0 else 0
@@ -1111,13 +712,13 @@ def calculate_performance_metrics(upbit, portfolio_summary):
         return None
 
 def print_performance_summary(performance):
-    """성과 요약 출력"""
+    """성과 요약 출력 (현금 포함 전체 자산 기준)"""
     if not performance:
         print("❌ 성과 데이터를 불러올 수 없습니다.")
         return
     
     print(f"\n💼 포트폴리오 현황:")
-    print(f"총 자산: {performance['total_value']:,.0f}원")
+    print(f"총 자산: {performance['total_value']:,.0f}원 (현금 + 코인)")
     print(f"현금 비중: {performance['krw_percentage']:.1f}% ({performance['krw_balance']:,.0f}원)")
     
     print(f"\n🪙 코인별 보유 현황:")
@@ -1165,12 +766,102 @@ def check_performance_alerts(performance):
         print(f"\n✅ 포트폴리오 상태 양호")
         print(f"  현금: {krw_pct:.1f}% | 최대비중: {max([d['percentage'] for d in performance['coin_values'].values()], default=0):.1f}%")
 
+
+# ============================================================================
+# 거래 실행 함수
+# ============================================================================
+
 def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0, base_trade_ratio=BASE_TRADE_RATIO):
     """포트폴리오 기반 스마트 매매 실행 - 시장 상황 고려 + 안전장치"""
     print(f"\n💰 포트폴리오 매매 실행 시작 (기본 비율: {base_trade_ratio:.1%})")
     
     # 거래 실행 이력 저장용
     executed_trades = []
+    
+    # 🔴 약세장 감지 및 현금 방어 모드 (최우선 체크)
+    print("🐻 약세장 감지 중...")
+    bear_market_check = detect_bear_market(portfolio_summary)
+    
+    if bear_market_check['is_bear_market']:
+        print(f"🚨 약세장 감지! (신뢰도: {bear_market_check['confidence']:.1%})")
+        print(f"   근거: {bear_market_check.get('reason', '복합 약세 신호')}")
+        print(f"   지표: {bear_market_check['indicators']}")
+        print(f"   🛡️ 현금 방어 모드 활성화")
+        
+        # 현금 비중 50% 이상으로 강제 조정
+        current_krw = upbit.get_balance("KRW")
+        total_value = get_total_portfolio_value(upbit)
+        cash_ratio = current_krw / total_value if total_value > 0 else 0
+        
+        if cash_ratio < BEAR_MARKET_CASH_RATIO:
+            needed_cash = (total_value * BEAR_MARKET_CASH_RATIO) - current_krw
+            print(f"   💸 현금 비중 부족: {cash_ratio:.1%} → {BEAR_MARKET_CASH_RATIO:.0%} 목표")
+            print(f"   필요 현금: {needed_cash:,.0f}원")
+            
+            # 수익 나는 코인 우선 매도
+            profitable_coins = []
+            for ticker in PORTFOLIO_COINS:
+                coin = ticker.split('-')[1]
+                balance = upbit.get_balance(ticker)
+                if balance > 0:
+                    try:
+                        avg_buy_price = upbit.get_avg_buy_price(ticker)
+                        orderbook = get_safe_orderbook(ticker)
+                        if not orderbook:
+                            continue
+                        current_price = orderbook['orderbook_units'][0]['bid_price']
+                        
+                        if avg_buy_price and avg_buy_price > 0:
+                            profit_rate = (current_price - avg_buy_price) / avg_buy_price
+                            if profit_rate > -0.05:  # -5% 이상 (손실 적거나 수익)
+                                coin_value = balance * current_price
+                                profitable_coins.append({
+                                    'ticker': ticker,
+                                    'coin': coin,
+                                    'profit_rate': profit_rate,
+                                    'balance': balance,
+                                    'price': current_price,
+                                    'value': coin_value
+                                })
+                    except Exception as e:
+                        logging.debug(f"방어 매도 정보 조회 실패 ({coin}): {e}")
+                        continue
+            
+            if profitable_coins:
+                # 수익률 높은 순 정렬
+                profitable_coins.sort(key=lambda x: x['profit_rate'], reverse=True)
+                
+                # 상위 코인부터 매도하여 현금 확보
+                cash_secured = 0
+                for coin_info in profitable_coins:
+                    if current_krw + cash_secured >= total_value * BEAR_MARKET_CASH_RATIO:
+                        break
+                    
+                    # 50%만 매도 (전량 아님 - 반등 대비)
+                    sell_ratio = 0.5
+                    sell_amount = coin_info['balance'] * sell_ratio
+                    sell_value = sell_amount * coin_info['price']
+                    
+                    if sell_value >= MIN_TRADE_AMOUNT:
+                        try:
+                            result = upbit.sell_market_order(coin_info['ticker'], sell_amount)
+                            if result:
+                                cash_secured += sell_value * 0.9995  # 수수료 고려
+                                print(f"   ✅ {coin_info['coin']} 방어 매도: {sell_value:,.0f}원 (수익률: {coin_info['profit_rate']:+.1%})")
+                                logging.info(f"BEAR_DEFENSE_SELL - {coin_info['coin']}: {sell_value:,.0f}원, 수익률 {coin_info['profit_rate']:+.1%}")
+                        except Exception as e:
+                            print(f"   ❌ {coin_info['coin']} 방어 매도 실패: {e}")
+                            logging.error(f"BEAR_DEFENSE_SELL_ERROR - {coin_info['coin']}: {e}")
+                
+                final_cash_ratio = (current_krw + cash_secured) / total_value if total_value > 0 else 0
+                print(f"   ✅ 방어 매도 완료: 현금 {cash_ratio:.1%} → {final_cash_ratio:.1%}")
+            else:
+                print(f"   ⚠️ 매도 가능한 코인 없음 (모두 손실 중)")
+        
+        # 약세장에서는 신규 매수 중단
+        print(f"   ⛔ 약세장으로 신규 매수 중단 (현금 보존 모드)")
+        print(f"   💡 현금 {cash_ratio:.1%} 보유 - 반등 대기")
+        return  # 매매 실행하지 않고 종료
     
     # 1. 손절매 확인
     print("🛡️ 손절매 확인 중...")
@@ -1228,41 +919,19 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
             recent_signals[coin] = recent_signals[coin][-5:]
 
         try:
-            current_total_value = upbit.get_balance("KRW")
+            # ✨ 헬퍼 함수 사용: 총 자산 계산
+            current_total_value = get_total_portfolio_value(upbit)
             current_coin_balance = upbit.get_balance(ticker)
             
-            # 안전한 가격 조회 - 더 강화된 검증
-            orderbook = pyupbit.get_orderbook(ticker=ticker)
+            # ✨ 헬퍼 함수 사용: 안전한 호가 조회
+            orderbook = get_safe_orderbook(ticker)
             if not orderbook:
-                logging.warning(f"{coin} 호가 정보 없음 (None) - 건너뜀")
+                logging.warning(f"{coin} 호가 정보 조회 실패 - 건너뜀")
                 print(f"  ⚠️ {coin} 호가 정보 없음")
-                continue
-            
-            if 'orderbook_units' not in orderbook:
-                logging.warning(f"{coin} orderbook_units 키 없음 - 건너뜀")
-                print(f"  ⚠️ {coin} 호가 구조 오류")
-                continue
-                
-            if not orderbook['orderbook_units'] or len(orderbook['orderbook_units']) == 0:
-                logging.warning(f"{coin} orderbook_units 비어있음 - 건너뜀")
-                print(f"  ⚠️ {coin} 호가 데이터 없음")
                 continue
             
             current_price = orderbook['orderbook_units'][0]['ask_price']
             current_coin_value = current_coin_balance * current_price if current_coin_balance > 0 else 0
-            
-            # 전체 포트폴리오 가치 계산 (KRW + 모든 코인) - 개별 예외 처리
-            for other_ticker in PORTFOLIO_COINS:
-                try:
-                    other_balance = upbit.get_balance(other_ticker)
-                    if other_balance > 0:
-                        other_orderbook = pyupbit.get_orderbook(ticker=other_ticker)
-                        if other_orderbook and 'orderbook_units' in other_orderbook and other_orderbook['orderbook_units']:
-                            other_price = other_orderbook['orderbook_units'][0]['ask_price']
-                            current_total_value += other_balance * other_price
-                except Exception as e:
-                    logging.debug(f"{other_ticker} 조회 실패 (무시하고 계속): {e}")
-                    continue
             
             current_coin_ratio = current_coin_value / current_total_value if current_total_value > 0 else 0
             max_concentration = MAX_SINGLE_COIN_RATIO  # config.json의 trading_constraints 사용
@@ -1305,8 +974,9 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                         # 집중도 및 호가 확인
                         try:
                             other_balance = upbit.get_balance(other)
-                            other_orderbook = pyupbit.get_orderbook(ticker=other)
-                            if not other_orderbook or 'orderbook_units' not in other_orderbook or not other_orderbook['orderbook_units']:
+                            # ✨ 헬퍼 함수 사용: 안전한 호가 조회
+                            other_orderbook = get_safe_orderbook(other)
+                            if not other_orderbook:
                                 logging.debug(f"{other} 호가 정보 없음 (분산매수 제외)")
                                 continue
                             other_price = other_orderbook['orderbook_units'][0]['ask_price']
@@ -1352,21 +1022,9 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                         logging.info(f"BUY_SKIP - {coin}: 집중도 초과, 분산 매수 불가 (현금 유지)")
                         continue
                 
-                # 🔴 현재 KRW 잔고 및 총 자산 가져오기 (연속 매수 제한 체크에 필요)
+                # ✨ 헬퍼 함수 사용: 총 자산 계산 (연속 매수 제한 체크용)
+                total_value = get_total_portfolio_value(upbit)
                 current_krw = upbit.get_balance("KRW")
-                balances = upbit.get_balances()
-                total_value = current_krw
-                for balance in balances:
-                    if balance['currency'] != 'KRW':
-                        ticker_temp = f"KRW-{balance['currency']}"
-                        try:
-                            current_price_temp = pyupbit.get_current_price(ticker_temp)
-                            if current_price_temp:
-                                total_value += float(balance['balance']) * current_price_temp
-                        except Exception as e:
-                            # 거래되지 않는 코인은 무시하고 계속 진행
-                            logging.debug(f"{ticker_temp} 가격 조회 실패 (무시): {e}")
-                            continue
                 
                 # 🔴 비중 기반 매수 제한 (악순환 방지)
                 current_allocation = portfolio_summary.get('portfolio_allocation', {}).get(coin, 0)
@@ -1486,6 +1144,26 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                     logging.warning(f"포트폴리오 스냅샷 조회 실패 (간단 추정 사용): {e}")
                     # 현금 기반 간단 추정: 현금 / 최소현금비율 = 전체 포트폴리오 추정
                     total_value = current_krw / MIN_CASH_RATIO if current_krw > 0 else current_total_value
+                
+                # 🔴 매수 전 예상 비중 체크 (초과 방지)
+                expected_coin_value = current_coin_value + trade_amount
+                expected_coin_ratio = expected_coin_value / total_value if total_value > 0 else 0
+                
+                if expected_coin_ratio > MAX_SINGLE_COIN_RATIO:
+                    # 비중 초과 시 매수 금액 조정 (목표 비중까지만)
+                    max_allowed_value = total_value * MAX_SINGLE_COIN_RATIO
+                    adjusted_trade_amount = max(0, max_allowed_value - current_coin_value) * 0.9995
+                    
+                    if adjusted_trade_amount >= MIN_TRADE_AMOUNT:
+                        trade_amount = adjusted_trade_amount
+                        print(f"  ⚠️ 비중 초과 방지: 매수 금액 조정")
+                        print(f"     원래: {current_krw * final_ratio:,.0f}원 → 조정: {trade_amount:,.0f}원")
+                        print(f"     예상 비중: {expected_coin_ratio:.1%} → {MAX_SINGLE_COIN_RATIO:.1%}")
+                        logging.info(f"BUY_ADJUSTED - {coin}: 비중 초과 방지 ({expected_coin_ratio:.1%} → {MAX_SINGLE_COIN_RATIO:.1%}), {trade_amount:,.0f}원")
+                    else:
+                        print(f"  ❌ 비중 초과로 매수 불가 (현재: {current_coin_ratio:.1%}, 예상: {expected_coin_ratio:.1%})")
+                        logging.info(f"BUY_SKIP - {coin}: 비중 초과 ({current_coin_ratio:.1%} → {expected_coin_ratio:.1%} > {MAX_SINGLE_COIN_RATIO:.1%})")
+                        continue
                 
                 krw_ratio = current_krw / total_value if total_value > 0 else 1
                 cash_ratio_for_check = current_krw / total_value if total_value > 0 else 0
@@ -1974,6 +1652,11 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
     
     print(f"\n✅ 포트폴리오 매매 실행 완료")
 
+
+# ============================================================================
+# 상세 로깅 함수 (투자 데이터 수집용)
+# ============================================================================
+
 def log_detailed_trade(coin, action, amount, price, total_value, balance_change, 
                       market_data, ai_signal, portfolio_before, portfolio_after):
     """상세 거래 데이터 로깅 (JSON 형태)"""
@@ -2119,6 +1802,11 @@ def get_current_portfolio_snapshot(upbit):
         logging.error(f"포트폴리오 스냅샷 생성 실패: {e}")
         return {'total_value': 0}
 
+
+# ============================================================================
+# 체크 주기 계산 및 모니터링 함수
+# ============================================================================
+
 def calculate_check_interval(portfolio_summary, news_analysis=None):
     """시장 변동성과 뉴스 긴급도에 따른 체크 주기 계산 - 기회 포착 강화"""
     total_volatility = 0
@@ -2158,19 +1846,7 @@ def calculate_check_interval(portfolio_summary, news_analysis=None):
         print(f"😴 저변동성 감지 ({avg_volatility:.1f}%) → {interval_min}분 후 재체크")
         return interval_min * 60               # 분 → 초
 
-def load_config():
-    """설정 파일 로드"""
-    try:
-        with open('config.json', 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        print("✅ 설정 파일 로드 완료")
-        return config
-    except FileNotFoundError:
-        print("⚠️ config.json 파일이 없습니다. 기본 설정값을 사용합니다.")
-        return None
-    except json.JSONDecodeError as e:
-        print(f"❌ 설정 파일 파싱 오류: {e}")
-        return None
+# load_config() 함수는 상단에 정의되어 있음 (중복 제거됨)
 
 def setup_logging():
     """로깅 시스템 설정"""
@@ -2227,6 +1903,11 @@ def setup_detailed_logging():
     
     return trade_logger, signal_logger, performance_logger
 
+
+# ============================================================================
+# 메인 트레이딩 봇 실행 함수
+# ============================================================================
+
 def run_trading_bot():
     """24시간 자동화 트레이딩 봇 실행"""
     # 설정 파일 로드
@@ -2275,7 +1956,7 @@ def run_trading_bot():
             
             # 1. 포트폴리오 데이터 수집
             print("📊 포트폴리오 데이터 수집 중...")
-            portfolio_data = get_portfolio_data()
+            portfolio_data = get_portfolio_data(PORTFOLIO_COINS, DATA_PERIOD)
             
             if not portfolio_data:
                 print("❌ 데이터 수집 실패, 1시간 후 재시도")
@@ -2285,7 +1966,7 @@ def run_trading_bot():
             # 2. 시장 지표 수집 (뉴스 감정 분석 추가)
             print("📈 시장 지표 수집 중...")
             fng = get_fear_greed_index()
-            news = get_news_headlines()
+            news = get_news_headlines(PORTFOLIO_COINS, CACHE_FILE, CACHE_DURATION)
             news_analysis = analyze_news_sentiment(news)
             
             print(f"공포탐욕지수: {fng.get('value', 'N/A')} ({fng.get('text', 'N/A')})")
@@ -2300,7 +1981,7 @@ def run_trading_bot():
                 print(f"📢 주요 이벤트: {', '.join(news_analysis['events'])}")
             
             # 3. 포트폴리오 요약 생성
-            portfolio_summary = make_portfolio_summary(portfolio_data, fng, news)
+            portfolio_summary = make_portfolio_summary(portfolio_data, fng, news, calculate_rsi)
             
             # 4. AI 분석 실행
             print("\n🤖 AI 포트폴리오 분석 중...")
@@ -2844,3 +2525,8 @@ if __name__ == "__main__":
         print(f"  - AI 신호 로그: ai_signals_{datetime.now().strftime('%Y%m%d')}.json") 
         print(f"  - 성과 로그: performance_{datetime.now().strftime('%Y%m%d')}.json")
         run_trading_bot()
+
+
+# ============================================================================
+# 프로그램 시작점
+# ============================================================================
