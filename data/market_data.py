@@ -6,6 +6,7 @@
 import pyupbit
 import requests
 import pandas as pd
+import time
 
 
 def get_portfolio_data(portfolio_coins, data_period):
@@ -41,11 +42,34 @@ def get_portfolio_data(portfolio_coins, data_period):
                 elif tf == 'hour1':
                     interval = 'minute60'   # 1시간 = 60분
                 
-                df = pyupbit.get_ohlcv(ticker, interval=interval, count=count)
-                if df is not None:
+                # 재시도 로직 추가 (최대 5번)
+                df = None
+                last_error = None
+                success = False
+                
+                for attempt in range(5):
+                    try:
+                        if attempt > 0:  # 재시도인 경우에만 대기
+                            print(f"   🔄 {ticker} {tf} 재시도 {attempt}/4...")
+                            time.sleep(2)
+                        else:
+                            time.sleep(0.2)  # 첫 시도는 0.2초만 대기 (rate limit 방지)
+                        
+                        df = pyupbit.get_ohlcv(ticker, interval=interval, count=count)
+                        
+                        if df is not None and not df.empty:
+                            success = True
+                            break
+                        else:
+                            last_error = "빈 데이터 반환"
+                            
+                    except Exception as retry_error:
+                        last_error = f"{type(retry_error).__name__}: {retry_error}"
+                
+                if success:
                     portfolio_data[coin_name][tf] = df
                 else:
-                    print(f"❌ {ticker} {tf} 데이터 수집 실패")
+                    print(f"❌ {ticker} {tf} 데이터 수집 실패 (5회 시도): {last_error}")
             
             if portfolio_data[coin_name]:
                 print(f"✅ {coin_name} 다중 타임프레임 데이터 수집 완료")

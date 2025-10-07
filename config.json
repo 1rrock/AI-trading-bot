@@ -60,13 +60,15 @@
       "KRW-XRP"
     ],
     "target_allocation": {
-      "KRW-BTC": 0.25,
-      "KRW-ETH": 0.25,
-      "KRW-SOL": 0.30,
-      "KRW-XRP": 0.20
+      "KRW-BTC": 0.175,
+      "KRW-ETH": 0.175,
+      "KRW-SOL": 0.21,
+      "KRW-XRP": 0.14
     },
-    "target_allocation_desc": "각 코인별 목표 포트폴리오 비중 (리밸런싱 기준)",
-    "allocation_desc": "BTC(25%), ETH(25%), SOL(30%), XRP(20%) 목표 비중"
+    "target_allocation_desc": "각 코인별 목표 포트폴리오 비중 (리밸런싱 기준, 신규코인 15% 반영)",
+    "allocation_desc": "현금(15%), BTC(17.5%), ETH(17.5%), SOL(21%), XRP(14%), 신규코인(15%) 목표 비중",
+    "trend_coin_ratio": 0.15,
+    "trend_coin_ratio_desc": "신규/트렌드 코인 전체 자산 비중 (예: 0.15 = 15%)"
   },
   
   "alerts": {

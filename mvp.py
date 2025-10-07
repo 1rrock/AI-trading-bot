@@ -17,6 +17,7 @@ import time
 import logging
 from datetime import datetime, timedelta
 import numpy as np
+import threading
 
 # ============================================================================
 # 모듈 임포트
@@ -33,6 +34,7 @@ from data.news_collector import get_news_headlines, get_free_crypto_news, analyz
 # === 분석 모듈 ===
 from analysis.portfolio_analyzer import analyze_multi_timeframe, calculate_trend_alignment, make_portfolio_summary
 from analysis.market_condition import analyze_market_condition, detect_bear_market
+from trading.trendcoin_trader import execute_new_coin_trades
 
 # ============================================================================
 # 전역 변수 및 상태 관리
@@ -42,11 +44,55 @@ from analysis.market_condition import analyze_market_condition, detect_bear_mark
 last_partial_sell_time = {}  # 부분매도 쿨다운
 daily_sell_count = {}  # 일별 매도 횟수
 last_reset_date = None  # 마지막 리셋 날짜
+
+# === 신규/트렌드 코인 투자 관련 설정 ===
+TREND_CHECK_INTERVAL_MIN = 20  # 신규코인만 20분마다 별도 모니터링
+daily_sell_count = {}  # 일별 매도 횟수
+last_reset_date = None  # 마지막 리셋 날짜
 last_rebalance_time = {}  # 리밸런싱 쿨다운 (악순환 방지)
 
 # ============================================================================
 # 설정 로드
 # ============================================================================
+
+
+# === 설정 로드 ===
+def load_config():
+    """설정 파일에서 설정을 로드합니다."""
+    try:
+        with open('config.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logging.error("config.json 파일을 찾을 수 없습니다. 기본값 사용")
+        return get_default_config()
+    except json.JSONDecodeError as e:
+        logging.error(f"config.json 파일 파싱 오류: {e}. 기본값 사용")
+        return get_default_config()
+
+def get_default_config():
+    """기본 설정값을 반환합니다."""
+    return {
+        "trading": {"base_trade_ratio": 0.15, "stop_loss_percent": 15, "min_trade_amount": 5000},
+        "technical_analysis": {"rsi_oversold": 30, "rsi_overbought": 70, "data_period_days": 30},
+        "market_conditions": {"bull_market_threshold": 10, "bear_market_threshold": -10, 
+                            "fear_greed_extreme_fear": 25, "fear_greed_extreme_greed": 75},
+        "coins": {
+            "list": ["KRW-BTC", "KRW-ETH", "KRW-SOL", "KRW-XRP"],
+            "target_allocation": {"KRW-BTC": 0.25, "KRW-ETH": 0.25, "KRW-SOL": 0.30, "KRW-XRP": 0.20}
+        },
+        "cache": {"cache_file": "news_cache.json", "cache_duration_hours": 4},
+        "safety": {"min_cash_ratio": 0.15, "max_portfolio_concentration": 0.45},
+        "check_intervals": {
+            "extreme_volatility_threshold": 8.0, "extreme_volatility_interval": 15,
+            "high_volatility_threshold": 5.0, "high_volatility_interval": 30,
+            "medium_volatility_threshold": 2.0, "medium_volatility_interval": 60,
+            "low_volatility_interval": 120, "default_interval": 60
+        }
+    }
+
+# 설정 로드 후 신규/트렌드 코인 투자 비율 할당
+CONFIG = load_config()
+TREND_INVEST_RATIO = CONFIG["coins"].get("trend_coin_ratio", 0.15)  # config에서 읽음
 
 # === 설정 로드 ===
 def load_config():
@@ -1905,6 +1951,67 @@ def setup_detailed_logging():
 
 
 # ============================================================================
+# 신규/트렌드 코인 자동 투자 스레드 (적응형 체크 주기)
+# ============================================================================
+
+def trend_coin_trading_loop(upbit, stop_event):
+    """
+    신규/트렌드 코인 자동 투자 - 독립 스레드 (적응형 체크 주기)
+    - 보유 중: 5분마다 빠른 모니터링 (손절/익절)
+    - 미보유: 20분마다 기회 탐색
+    - stop_event로 종료 제어
+    """
+    logger = logging.getLogger(__name__)
+    
+    # 관리 중인 신규코인 추적 (이 함수에서 매수한 코인만)
+    managed_coins = set()
+    
+    while not stop_event.is_set():
+        try:
+            logger.info(f"🔄 [신규코인] 트렌드 코인 체크 시작")
+            print(f"\n🔄 [신규코인] 트렌드 코인 체크 ({datetime.now().strftime('%H:%M:%S')})")
+            
+            # 신규코인 투자/관리 실행 (관리 중인 코인 전달 및 반환)
+            current_holdings = execute_new_coin_trades(
+                upbit,
+                portfolio_coins=PORTFOLIO_COINS,
+                min_trade_amount=MIN_TRADE_AMOUNT,
+                invest_ratio=TREND_INVEST_RATIO,
+                check_interval_min=5,  # 항상 5분 주기 전달 (관리 모드용)
+                managed_coins=managed_coins
+            )
+            
+            # 적응형 체크 주기 결정
+            if current_holdings:
+                check_interval = 5  # 보유 중: 5분 (빠른 모니터링)
+                status = f"보유 중 {len(current_holdings)}개"
+            else:
+                check_interval = TREND_CHECK_INTERVAL_MIN  # 미보유: 20분
+                status = "탐색 중"
+            
+            logger.info(f"✅ [신규코인] 체크 완료 - {check_interval}분 후 재체크 ({status})")
+            print(f"⏰ [신규코인] {check_interval}분 후 재체크 ({status})")
+            
+            # 적응형 대기 (1초마다 stop_event 확인)
+            for _ in range(check_interval * 60):
+                if stop_event.is_set():
+                    break
+                time.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"❌ [신규코인] 투자 오류: {e}")
+            print(f"❌ [신규코인] 투자 오류: {e}")
+            # 오류 발생 시 5분 대기
+            for _ in range(300):
+                if stop_event.is_set():
+                    break
+                time.sleep(1)
+    
+    logger.info("🛑 [신규코인] 트렌드 코인 투자 스레드 종료")
+    print("🛑 [신규코인] 트렌드 코인 투자 스레드 종료")
+
+
+# ============================================================================
 # 메인 트레이딩 봇 실행 함수
 # ============================================================================
 
@@ -1939,6 +2046,18 @@ def run_trading_bot():
     
     upbit = pyupbit.Upbit(access, secret)
     print("✅ 업비트 API 연결 완료")
+    
+    # 신규코인 투자 스레드 시작 (20분마다 독립 실행)
+    stop_event = threading.Event()
+    trend_thread = threading.Thread(
+        target=trend_coin_trading_loop, 
+        args=(upbit, stop_event),
+        daemon=True,
+        name="TrendCoinThread"
+    )
+    trend_thread.start()
+    logger.info("🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (20분 주기)")
+    print(f"🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (20분 주기)")
     
     cycle_count = 0
     
@@ -2034,6 +2153,9 @@ def run_trading_bot():
             # 7. 매매 실행
             print(f"\n💰 스마트 매매 실행:")
             execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count)
+
+            # 7-1. 신규/트렌드 코인 투자는 별도 스레드에서 20분마다 실행 중
+            # (execute_new_coin_trades는 메인 루프에서 제거됨)
             
             # 8. 다음 체크 주기 계산 (뉴스 분석 결과 반영)
             check_interval = calculate_check_interval(portfolio_summary, news_analysis)
@@ -2048,6 +2170,8 @@ def run_trading_bot():
         except KeyboardInterrupt:
             logger.info("🛑 사용자에 의해 봇이 중단되었습니다.")
             print(f"\n\n🛑 사용자에 의해 봇이 중단되었습니다.")
+            stop_event.set()  # 신규코인 스레드 종료 신호
+            trend_thread.join(timeout=5)  # 최대 5초 대기
             break
             
         except requests.exceptions.RequestException as e:
