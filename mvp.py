@@ -1956,8 +1956,8 @@ def setup_detailed_logging():
 
 def trend_coin_trading_loop(upbit, stop_event):
     """
-    신규/트렌드 코인 자동 투자 - 독립 스레드 (적응형 체크 주기)
-    - 보유 중: 5분마다 빠른 모니터링 (손절/익절)
+    신규/트렌드 코인 자동 투자 - 독립 스레드 (공격적 적응형 체크 주기)
+    - 보유 중: 3분마다 빠른 모니터링 (손절 -5%, 부분익절 +5%, 전량익절 +8%)
     - 미보유: 20분마다 기회 탐색
     - stop_event로 종료 제어
     """
@@ -1977,13 +1977,13 @@ def trend_coin_trading_loop(upbit, stop_event):
                 portfolio_coins=PORTFOLIO_COINS,
                 min_trade_amount=MIN_TRADE_AMOUNT,
                 invest_ratio=TREND_INVEST_RATIO,
-                check_interval_min=5,  # 항상 5분 주기 전달 (관리 모드용)
+                check_interval_min=3,  # 3분 주기 전달 (공격적 관리 모드)
                 managed_coins=managed_coins
             )
             
-            # 적응형 체크 주기 결정
+            # 적응형 체크 주기 결정 (공격적)
             if current_holdings:
-                check_interval = 5  # 보유 중: 5분 (빠른 모니터링)
+                check_interval = 3  # 보유 중: 3분 (매우 빠른 모니터링)
                 status = f"보유 중 {len(current_holdings)}개"
             else:
                 check_interval = TREND_CHECK_INTERVAL_MIN  # 미보유: 20분
@@ -2001,8 +2001,8 @@ def trend_coin_trading_loop(upbit, stop_event):
         except Exception as e:
             logger.error(f"❌ [신규코인] 투자 오류: {e}")
             print(f"❌ [신규코인] 투자 오류: {e}")
-            # 오류 발생 시 5분 대기
-            for _ in range(300):
+            # 오류 발생 시 3분 대기 (빠른 복구)
+            for _ in range(180):
                 if stop_event.is_set():
                     break
                 time.sleep(1)
@@ -2056,8 +2056,9 @@ def run_trading_bot():
         name="TrendCoinThread"
     )
     trend_thread.start()
-    logger.info("🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (20분 주기)")
-    print(f"🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (20분 주기)")
+    logger.info("🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (공격적 전략: 3분 모니터링)")
+    print(f"🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (공격적 전략: 3분 모니터링)")
+    print(f"   📊 손절 -5% | 부분익절 +5%(50%) | 전량익절 +8%")
     
     cycle_count = 0
     

@@ -18,18 +18,49 @@ from utils.logger import log_decision
 CRYPTOCOMPARE_NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
 
 def get_top_trend_coins(n=5):
-    """업비트 거래대금 기준 TOP n 코인 조회"""
+    """
+    트렌드 코인 탐지 (거래대금 + 변동률 하이브리드)
+    1. 거래대금(가격×거래량) 상위 30개 추출 → 실제 시장 관심도
+    2. 그 중 24시간 변동률 높은 순으로 정렬 → 모멘텀
+    3. 과도한 급등/급락 제외 (-30% ~ +50%) → 펌핑 회피
+    4. 상위 n개 반환
+    """
     tickers = pyupbit.get_tickers(fiat="KRW")
-    volumes = {}
+    coin_data = []
+    
     for ticker in tickers:
         try:
-            ohlcv = pyupbit.get_ohlcv(ticker, interval="day", count=1)
-            if ohlcv is not None and not ohlcv.empty:
-                volumes[ticker] = ohlcv['volume'].iloc[-1]
+            # 24시간 OHLCV 데이터
+            ohlcv = pyupbit.get_ohlcv(ticker, interval="day", count=2)
+            if ohlcv is None or len(ohlcv) < 2:
+                continue
+            
+            # 거래대금 = 종가 × 거래량
+            current_close = ohlcv['close'].iloc[-1]
+            current_volume = ohlcv['volume'].iloc[-1]
+            trade_value = current_close * current_volume
+            
+            # 24시간 변동률 계산
+            prev_close = ohlcv['close'].iloc[-2]
+            change_rate = ((current_close - prev_close) / prev_close) * 100
+            
+            # 과도한 급등/급락 제외 (-30% ~ +50%)
+            if -30 <= change_rate <= 50:
+                coin_data.append({
+                    'ticker': ticker,
+                    'trade_value': trade_value,
+                    'change_rate': change_rate
+                })
         except Exception:
             continue
-    top_coins = sorted(volumes.items(), key=lambda x: x[1], reverse=True)[:n]
-    return [t[0] for t in top_coins]
+    
+    # 1단계: 거래대금 상위 30개
+    top_by_value = sorted(coin_data, key=lambda x: x['trade_value'], reverse=True)[:30]
+    
+    # 2단계: 그 중 변동률 높은 순 n개 (상승 우선)
+    top_trend = sorted(top_by_value, key=lambda x: x['change_rate'], reverse=True)[:n]
+    
+    return [coin['ticker'] for coin in top_trend]
 
 
 def get_real_coin_news(coin_name, max_news=5):
@@ -248,12 +279,13 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
             balance_amount = float(balance['balance'])
             current_value = balance_amount * current_price
             
-            # 손절 조건: -8% 이하
-            if profit_rate <= -8:
+            # 손절 조건: -5% 이하 (공격적 손절)
+            if profit_rate <= -5:
                 print(f"🚨 [신규코인 손절] {coin_name}: {profit_rate:.1f}% 손실 → 즉시 매도")
                 result = upbit.sell_market_order(ticker, balance_amount)
                 if result:
                     print(f"✅ {coin_name} 손절 완료: {current_value:,.0f}원")
+                    managed_coins.discard(ticker)  # 관리 목록에서 제거
                     log_decision(
                         action="SELL",
                         coin=coin_name,
@@ -263,12 +295,13 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
                     )
                 continue
             
-            # 익절 조건: +15% 이상
-            if profit_rate >= 15:
-                print(f"💰 [신규코인 익절] {coin_name}: {profit_rate:.1f}% 수익 → 즉시 매도")
+            # 익절 조건 1: +8% 이상 (빠른 수익 실현)
+            if profit_rate >= 8:
+                print(f"💰 [신규코인 익절] {coin_name}: {profit_rate:.1f}% 수익 → 전량 매도")
                 result = upbit.sell_market_order(ticker, balance_amount)
                 if result:
                     print(f"✅ {coin_name} 익절 완료: {current_value:,.0f}원 (수익: +{profit_rate:.1f}%)")
+                    managed_coins.discard(ticker)  # 관리 목록에서 제거
                     log_decision(
                         action="SELL",
                         coin=coin_name,
@@ -278,11 +311,32 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
                     )
                 continue
             
+            # 부분 익절 조건: +5% 이상 (리스크 감소)
+            if profit_rate >= 5 and current_value >= min_trade_amount * 2:
+                # 50% 부분 매도
+                partial_amount = balance_amount * 0.5
+                print(f"💵 [신규코인 부분익절] {coin_name}: {profit_rate:.1f}% → 50% 매도")
+                result = upbit.sell_market_order(ticker, partial_amount)
+                if result:
+                    sold_value = partial_amount * current_price
+                    print(f"✅ {coin_name} 부분익절 완료: {sold_value:,.0f}원 (남은 50%는 +8% 목표)")
+                    log_decision(
+                        action="SELL",
+                        coin=coin_name,
+                        allowed=True,
+                        reason=f"신규코인 부분익절: {profit_rate:.1f}% (50%)",
+                        context={"ticker": ticker, "profit_rate": profit_rate, "sold_value": sold_value}
+                    )
+                # 부분 매도 후에도 계속 보유
+            
             # 보유 중 (모니터링)
             if profit_rate > 0:
-                print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (목표: +15%)")
+                if profit_rate >= 5:
+                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (1차 목표 도달, 2차: +8%)")
+                else:
+                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (1차 목표: +5%, 2차: +8%)")
             else:
-                print(f"📉 [신규코인 보유] {coin_name}: {profit_rate:.1f}% (손절: -8%)")
+                print(f"📉 [신규코인 보유] {coin_name}: {profit_rate:.1f}% (손절: -5%)")
                 
         except Exception as e:
             print(f"❌ {coin_name} 모니터링 오류: {e}")
@@ -347,7 +401,7 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
                 result = upbit.buy_market_order(ticker, amount * price)
                 if result:
                     print(f"✅ 신규코인 매수: {ticker} {amount:.4f}개 ({amount*price:,.0f}원)")
-                    print(f"📊 자동 관리: 손절 -8% | 익절 +15% | 모니터링 {check_interval_min}분")
+                    print(f"📊 공격적 전략: 손절 -5% | 부분익절 +5%(50%) | 전량익절 +8% | 모니터링 3분")
                     managed_coins.add(ticker)  # 관리 목록에 추가
                     currently_held.add(ticker)
                     log_decision(

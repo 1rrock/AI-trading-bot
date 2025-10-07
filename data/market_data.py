@@ -23,9 +23,9 @@ def get_portfolio_data(portfolio_coins, data_period):
     portfolio_data = {}
     
     timeframes = {
-        'day': data_period,      # 일봉
-        'hour4': 168,           # 4시간봉 1주일 (168시간)
-        'hour1': 168            # 1시간봉 1주일
+        'day': data_period,      # 일봉 (필수)
+        'hour4': 168,           # 4시간봉 1주일 (선택)
+        'hour1': 168            # 1시간봉 1주일 (선택)
     }
     
     for ticker in portfolio_coins:
@@ -42,37 +42,35 @@ def get_portfolio_data(portfolio_coins, data_period):
                 elif tf == 'hour1':
                     interval = 'minute60'   # 1시간 = 60분
                 
-                # 재시도 로직 추가 (최대 5번)
+                # 최대 2회만 시도 (불필요한 재시도 제거)
                 df = None
-                last_error = None
-                success = False
+                max_attempts = 2 if tf == 'day' else 1  # day는 2회, 나머지는 1회만
                 
-                for attempt in range(5):
+                for attempt in range(max_attempts):
                     try:
-                        if attempt > 0:  # 재시도인 경우에만 대기
-                            print(f"   🔄 {ticker} {tf} 재시도 {attempt}/4...")
-                            time.sleep(2)
+                        if attempt > 0:
+                            time.sleep(1)  # 재시도 시 1초 대기
                         else:
-                            time.sleep(0.2)  # 첫 시도는 0.2초만 대기 (rate limit 방지)
+                            time.sleep(0.2)  # 첫 시도는 0.2초만 대기
                         
                         df = pyupbit.get_ohlcv(ticker, interval=interval, count=count)
                         
                         if df is not None and not df.empty:
-                            success = True
+                            portfolio_data[coin_name][tf] = df
                             break
-                        else:
-                            last_error = "빈 데이터 반환"
-                            
-                    except Exception as retry_error:
-                        last_error = f"{type(retry_error).__name__}: {retry_error}"
+                        
+                    except Exception:
+                        pass  # 조용히 넘어감
                 
-                if success:
-                    portfolio_data[coin_name][tf] = df
-                else:
-                    print(f"❌ {ticker} {tf} 데이터 수집 실패 (5회 시도): {last_error}")
+                # 실패 시 경고 없이 넘어감 (일부 타임프레임 없어도 분석 가능)
             
+            # 최소 1개 이상의 타임프레임 데이터가 있으면 OK
             if portfolio_data[coin_name]:
-                print(f"✅ {coin_name} 다중 타임프레임 데이터 수집 완료")
+                collected = list(portfolio_data[coin_name].keys())
+                print(f"✅ {coin_name} 데이터 수집 완료 ({', '.join(collected)})")
+            else:
+                print(f"⚠️ {coin_name} 모든 타임프레임 수집 실패")
+
             
         except Exception as e:
             print(f"❌ {ticker} 오류: {e}")
