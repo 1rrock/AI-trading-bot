@@ -11,7 +11,7 @@ from openai import OpenAI
 import pyupbit
 import requests
 from datetime import datetime
-from utils.api_helpers import get_safe_orderbook
+from utils.api_helpers import get_safe_orderbook, get_safe_price
 from utils.logger import log_decision
 
 # CryptoCompare API 설정 (무료, API 키 불필요)
@@ -212,18 +212,24 @@ def ai_search_coin_news(coin_name, ticker=None):
     if not tech:
         return "뉴스 없음 - 기술적 분석 실패"
     
-    # 보수적 투자 조건 (명확한 신호만)
-    # RSI < 35 (과매도) + 거래량 급증 100% 이상 + 상승 추세
-    if tech['rsi'] < 35 and tech['volume_spike'] > 100 and tech['price_trend'] > 0:
+    # 보수적 투자 조건 - 완화된 기준
+    # RSI < 40 (과매도 영역) + 거래량 급증 50% 이상
+    if tech['rsi'] < 40 and tech['volume_spike'] > 50:
         msg = f"✅ 기술적 매수 신호 감지 (RSI:{tech['rsi']:.1f}, 거래량:{tech['volume_spike']:.0f}% ↑)"
         print(msg)
         return f"안전 - {msg}"
     
-    # RSI < 30 (극도 과매도) + 거래량 급증 50% 이상
-    elif tech['rsi'] < 30 and tech['volume_spike'] > 50:
-        msg = f"⚠️ 극과매도 + 거래량 급증 (RSI:{tech['rsi']:.1f}, 거래량:{tech['volume_spike']:.0f}% ↑)"
+    # RSI < 35 (과매도) + 거래량 급증 30% 이상
+    elif tech['rsi'] < 35 and tech['volume_spike'] > 30:
+        msg = f"⚠️ 과매도 + 거래량 증가 (RSI:{tech['rsi']:.1f}, 거래량:{tech['volume_spike']:.0f}% ↑)"
         print(msg)
         return f"주의 - {msg}"
+    
+    # RSI 80 이상 (과매수) - 위험
+    elif tech['rsi'] > 80:
+        msg = f"위험 - 과매수 (RSI:{tech['rsi']:.1f})"
+        print(f"🔴 {msg}")
+        return msg
     
     else:
         msg = f"기술적 신호 부족 (RSI:{tech['rsi']:.1f}, 거래량:{tech['volume_spike']:.0f}%)"
@@ -269,9 +275,10 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
             if avg_buy_price <= 0:
                 continue
             
-            # 현재가 조회
-            current_price = pyupbit.get_current_price(ticker)
-            if not current_price:
+            # 현재가 조회 (안전한 재시도 로직 사용)
+            current_price = get_safe_price(ticker, max_retries=3)
+            if not current_price or current_price <= 0:
+                print(f"❌ {coin_name} 모니터링 오류: 가격 조회 실패")
                 continue
             
             # 수익률 계산
@@ -279,8 +286,8 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
             balance_amount = float(balance['balance'])
             current_value = balance_amount * current_price
             
-            # 손절 조건: -5% 이하 (공격적 손절)
-            if profit_rate <= -5:
+            # 손절 조건: -8% 이하 (변동성 고려한 손절)
+            if profit_rate <= -8:
                 print(f"🚨 [신규코인 손절] {coin_name}: {profit_rate:.1f}% 손실 → 즉시 매도")
                 result = upbit.sell_market_order(ticker, balance_amount)
                 if result:
@@ -295,48 +302,66 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
                     )
                 continue
             
-            # 익절 조건 1: +8% 이상 (빠른 수익 실현)
-            if profit_rate >= 8:
-                print(f"💰 [신규코인 익절] {coin_name}: {profit_rate:.1f}% 수익 → 전량 매도")
+            # 3차 익절 조건: +20% 이상 (전량 매도)
+            if profit_rate >= 20:
+                print(f"💰💰 [신규코인 3차익절] {coin_name}: {profit_rate:.1f}% 수익 → 전량 매도")
                 result = upbit.sell_market_order(ticker, balance_amount)
                 if result:
-                    print(f"✅ {coin_name} 익절 완료: {current_value:,.0f}원 (수익: +{profit_rate:.1f}%)")
+                    print(f"✅ {coin_name} 3차익절 완료: {current_value:,.0f}원 (수익: +{profit_rate:.1f}%)")
                     managed_coins.discard(ticker)  # 관리 목록에서 제거
                     log_decision(
                         action="SELL",
                         coin=coin_name,
                         allowed=True,
-                        reason=f"신규코인 익절: {profit_rate:.1f}%",
+                        reason=f"신규코인 3차익절: {profit_rate:.1f}%",
                         context={"ticker": ticker, "profit_rate": profit_rate, "value": current_value}
                     )
                 continue
             
-            # 부분 익절 조건: +5% 이상 (리스크 감소)
-            if profit_rate >= 5 and current_value >= min_trade_amount * 2:
-                # 50% 부분 매도
+            # 2차 익절 조건: +15% 이상 (50% 추가 매도)
+            if profit_rate >= 15 and current_value >= min_trade_amount:
                 partial_amount = balance_amount * 0.5
-                print(f"💵 [신규코인 부분익절] {coin_name}: {profit_rate:.1f}% → 50% 매도")
+                print(f"💰 [신규코인 2차익절] {coin_name}: {profit_rate:.1f}% → 50% 추가 매도")
                 result = upbit.sell_market_order(ticker, partial_amount)
                 if result:
                     sold_value = partial_amount * current_price
-                    print(f"✅ {coin_name} 부분익절 완료: {sold_value:,.0f}원 (남은 50%는 +8% 목표)")
+                    print(f"✅ {coin_name} 2차익절 완료: {sold_value:,.0f}원 (남은 50%는 +20% 목표)")
                     log_decision(
                         action="SELL",
                         coin=coin_name,
                         allowed=True,
-                        reason=f"신규코인 부분익절: {profit_rate:.1f}% (50%)",
+                        reason=f"신규코인 2차익절: {profit_rate:.1f}% (50%)",
                         context={"ticker": ticker, "profit_rate": profit_rate, "sold_value": sold_value}
                     )
-                # 부분 매도 후에도 계속 보유
+                continue
+            
+            # 1차 익절 조건: +10% 이상 (40% 원금 회수)
+            if profit_rate >= 10 and current_value >= min_trade_amount * 2:
+                partial_amount = balance_amount * 0.4
+                print(f"💵 [신규코인 1차익절] {coin_name}: {profit_rate:.1f}% → 40% 원금 회수")
+                result = upbit.sell_market_order(ticker, partial_amount)
+                if result:
+                    sold_value = partial_amount * current_price
+                    print(f"✅ {coin_name} 1차익절 완료: {sold_value:,.0f}원 (남은 60%는 +15% 목표)")
+                    log_decision(
+                        action="SELL",
+                        coin=coin_name,
+                        allowed=True,
+                        reason=f"신규코인 1차익절: {profit_rate:.1f}% (40%)",
+                        context={"ticker": ticker, "profit_rate": profit_rate, "sold_value": sold_value}
+                    )
+                continue
             
             # 보유 중 (모니터링)
             if profit_rate > 0:
-                if profit_rate >= 5:
-                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (1차 목표 도달, 2차: +8%)")
+                if profit_rate >= 15:
+                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (2차 목표 도달, 3차: +20%)")
+                elif profit_rate >= 10:
+                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (1차 목표 도달, 2차: +15%)")
                 else:
-                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (1차 목표: +5%, 2차: +8%)")
+                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (1차 목표: +10%, 2차: +15%, 3차: +20%)")
             else:
-                print(f"📉 [신규코인 보유] {coin_name}: {profit_rate:.1f}% (손절: -5%)")
+                print(f"📉 [신규코인 보유] {coin_name}: {profit_rate:.1f}% (손절: -8%)")
                 
         except Exception as e:
             print(f"❌ {coin_name} 모니터링 오류: {e}")
@@ -358,12 +383,13 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
 
     for ticker in top_coins:
         coin_name = ticker.replace("KRW-", "")
-        if ticker not in portfolio_coins:
+        # 이미 보유 중이거나 포트폴리오 코인이면 건너뛰기 (중복 매수 방지)
+        if ticker not in portfolio_coins and ticker not in currently_held:
             # 하이브리드 분석: 뉴스 우선, 없으면 기술적 분석
             news_summary = ai_search_coin_news(coin_name, ticker=ticker)
             
             # 위험 키워드 체크 (뉴스 분석 결과)
-            if any(word in news_summary for word in ["악재", "해킹", "규제", "펌핑", "청산", "상장폐지", "사기", "소송"]):
+            if any(word in news_summary for word in ["악재", "해킹", "규제", "청산", "상장폐지", "사기", "소송"]):
                 print(f"⚠️ {coin_name} 투자 위험 신호 감지 - 매수 건너뜀")
                 log_decision(
                     action="BUY",
@@ -374,17 +400,22 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
                 )
                 continue
             
-            # 뉴스 없을 때 기술적 신호 부족 시 건너뜀
+            # 기술적 신호 부족 시에도 일부 허용 (RSI 기반)
             if "기술적 신호 부족" in news_summary:
-                print(f"⏸️ {coin_name} 뉴스 없음 + 기술적 신호 부족 - 매수 건너뜀")
-                log_decision(
-                    action="BUY",
-                    coin=coin_name,
-                    allowed=False,
-                    reason=f"뉴스 없음 + 기술적 신호 부족",
-                    context={"ticker": ticker, "analysis": news_summary}
-                )
-                continue
+                # 기술 지표 재확인
+                tech = analyze_technical_indicators(ticker)
+                if tech and (tech['rsi'] < 45 or tech['volume_spike'] > 40):
+                    print(f"✅ {coin_name} 뉴스 없지만 기술적 지표 양호 - 매수 진행")
+                else:
+                    print(f"⏸️ {coin_name} 뉴스 없음 + 기술적 신호 부족 - 매수 건너뜀")
+                    log_decision(
+                        action="BUY",
+                        coin=coin_name,
+                        allowed=False,
+                        reason=f"뉴스 없음 + 기술적 신호 부족",
+                        context={"ticker": ticker, "analysis": news_summary}
+                    )
+                    continue
             orderbook = get_safe_orderbook(ticker)
             if not orderbook:
                 log_decision(
@@ -401,7 +432,7 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
                 result = upbit.buy_market_order(ticker, amount * price)
                 if result:
                     print(f"✅ 신규코인 매수: {ticker} {amount:.4f}개 ({amount*price:,.0f}원)")
-                    print(f"📊 공격적 전략: 손절 -5% | 부분익절 +5%(50%) | 전량익절 +8% | 모니터링 3분")
+                    print(f"📊 분할익절 전략: 손절 -8% | 1차익절 +10%(40%) | 2차익절 +15%(50%) | 3차익절 +20%(100%) | 모니터링 5분")
                     managed_coins.add(ticker)  # 관리 목록에 추가
                     currently_held.add(ticker)
                     log_decision(

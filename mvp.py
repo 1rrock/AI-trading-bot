@@ -412,11 +412,12 @@ def check_cash_shortage_rebalance(upbit, min_cash_ratio=None):
         return False
 
 def check_portfolio_concentration_limits(upbit, max_single_position=None):
-    """포트폴리오 집중도 제한 체크 - 35% 초과 시 자동 매도로 33% 수준 조정"""
+    """포트폴리오 집중도 제한 체크 - 28% 초과 시 자동 매도 (악순환 방지 강화)"""
     if max_single_position is None:
-        max_single_position = MAX_SINGLE_COIN_RATIO  # 35% 사용
+        max_single_position = MAX_SINGLE_COIN_RATIO  # 28% 사용
     
     global last_rebalance_time  # 쿨다운 시간 기록
+    rebalancing_cooldown = CONFIG.get('safety', {}).get('rebalancing_cooldown_hours', 2) * 3600  # 2시간
     
     try:
         krw_balance = upbit.get_balance("KRW")
@@ -447,9 +448,17 @@ def check_portfolio_concentration_limits(upbit, max_single_position=None):
         for coin_info in coin_data:
             coin_ratio = coin_info['value'] / total_portfolio_value if total_portfolio_value > 0 else 0
             
-            # 35% 초과 시 33%로 조정
+            # 🔴 리밸런싱 쿨다운 체크 (악순환 방지)
+            if coin_info['coin'] in last_rebalance_time:
+                time_since_rebalance = time.time() - last_rebalance_time[coin_info['coin']]
+                if time_since_rebalance < rebalancing_cooldown:
+                    hours_remaining = (rebalancing_cooldown - time_since_rebalance) / 3600
+                    print(f"⏰ {coin_info['coin']} 리밸런싱 쿨다운 중 (남은 시간: {hours_remaining:.1f}시간)")
+                    continue  # 쿨다운 중이면 리밸런싱 건너뜀
+            
+            # 28% 초과 시 25%로 조정
             if coin_ratio > max_single_position:
-                target_ratio = 0.33  # 33% 목표 (안전 마진 2%)
+                target_ratio = 0.25  # 25% 목표 (안전 마진 3%)
                 print(f"⚖️ {coin_info['coin']} 비중 초과 감지: {coin_ratio:.1%} → {target_ratio:.0%} 목표")
                 
                 # 초과분 계산 (현재 - 목표)
@@ -467,7 +476,7 @@ def check_portfolio_concentration_limits(upbit, max_single_position=None):
                         
                         # 🔴 리밸런싱 쿨다운 시간 기록 (악순환 방지)
                         last_rebalance_time[coin_info['coin']] = time.time()
-                        print(f"  ⏰ {coin_info['coin']} 리밸런싱 쿨다운 시작 (2시간)")
+                        print(f"  ⏰ {coin_info['coin']} 리밸런싱 쿨다운 시작 ({rebalancing_cooldown/3600:.0f}시간)")
                         
                         return True
                 else:
@@ -693,14 +702,15 @@ def calculate_dynamic_position_size(market_condition, base_ratio=BASE_TRADE_RATI
                         pass
         
         cash_ratio = current_krw / total_value if total_value > 0 else 0
+        force_buy_threshold = CONFIG.get('safety', {}).get('force_buy_cash_threshold', 0.50)
         
         # 횡보장 + 탐욕 구간 = 추가 감소
         try:
             fng_int = int(fng_value)
-            if cash_ratio > 0.40:
-                # 🔴 현금 40% 초과 시 강제 매수 (횡보 페널티 무시)
-                risk_multiplier = 1.0
-                print(f"💰 현금 비중 과다 ({cash_ratio*100:.1f}%) - 강제 매수 활성화 (횡보 페널티 무시)")
+            if cash_ratio > force_buy_threshold:
+                # 🔴 현금 50% 초과 시 강제 매수 (횡보 페널티 무시)
+                risk_multiplier = 1.2  # 적극 매수
+                print(f"💰 현금 비중 과다 ({cash_ratio*100:.1f}%) - 강제 매수 활성화 (1.2배)")
             elif fng_int > 70:
                 risk_multiplier = 0.85  # 15% 감소 (기존 0.75에서 완화)
                 print(f"⏸️ 횡보장 + 탐욕 구간 - 거래 보수적 (0.85배) | 현금: {cash_ratio*100:.1f}%")
@@ -1074,22 +1084,23 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 
                 # 🔴 비중 기반 매수 제한 (악순환 방지)
                 current_allocation = portfolio_summary.get('portfolio_allocation', {}).get(coin, 0)
-                if current_allocation > MAX_SINGLE_COIN_RATIO * 0.8:  # 35%의 80% = 28%
+                if current_allocation > MAX_SINGLE_COIN_RATIO * 0.8:  # 28%의 80% = 22.4%
                     log_decision('BUY', coin, False, '비중 초과 (리밸런싱 악순환 방지)', {
                         'current_allocation': f"{current_allocation:.1%}",
-                        'threshold': '28%',
+                        'threshold': '22.4%',
                         'confidence': f"{confidence:.1%}",
                         'signal': signal
                     })
                     continue
                 
-                # 🔴 리밸런싱 직후 쿨다운 체크 (2시간)
+                # 🔴 리밸런싱 직후 쿨다운 체크 (config에서 읽기)
                 global last_rebalance_time
+                rebalancing_cooldown = CONFIG.get('safety', {}).get('rebalancing_cooldown_hours', 2) * 3600
                 if coin in last_rebalance_time:
                     time_since_rebalance = time.time() - last_rebalance_time[coin]
-                    if time_since_rebalance < 2 * 60 * 60:  # 2시간
-                        hours_remaining = (2 * 60 * 60 - time_since_rebalance) / 3600
-                        log_decision('BUY', coin, False, '리밸런싱 쿨다운', {
+                    if time_since_rebalance < rebalancing_cooldown:
+                        hours_remaining = (rebalancing_cooldown - time_since_rebalance) / 3600
+                        log_decision('BUY', coin, False, '리밸런싱 쿨다운 (악순환 방지)', {
                             'time_since_rebalance': f"{time_since_rebalance/3600:.1f}시간",
                             'cooldown_remaining': f"{hours_remaining:.1f}시간",
                             'confidence': f"{confidence:.1%}",
@@ -1100,13 +1111,14 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 # 연속 매수 제한: 최근 5회 중 3회 이상 매수면 건너뜀
                 # 🔴 강제 매수 모드에서는 완화 (3회 → 6회)
                 cash_ratio = current_krw / total_value if total_value > 0 else 0
-                consecutive_buy_limit = 6 if cash_ratio > 0.40 else 3
+                force_buy_threshold = CONFIG.get('safety', {}).get('force_buy_cash_threshold', 0.50)
+                consecutive_buy_limit = 6 if cash_ratio > force_buy_threshold else 3
                 buy_count = recent_signals[coin].count('BUY') + recent_signals[coin].count('STRONG_BUY')
                 if buy_count >= consecutive_buy_limit:
                     log_decision('BUY', coin, False, f'연속 매수 제한 ({buy_count}/{consecutive_buy_limit})', {
                         'recent_signals': recent_signals[coin],
                         'cash_ratio': f"{cash_ratio:.1%}",
-                        'force_buy_mode': cash_ratio > 0.40,
+                        'force_buy_mode': cash_ratio > force_buy_threshold,
                         'confidence': f"{confidence:.1%}",
                         'signal': signal
                     })
@@ -1213,9 +1225,10 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 
                 krw_ratio = current_krw / total_value if total_value > 0 else 1
                 cash_ratio_for_check = current_krw / total_value if total_value > 0 else 0
+                force_buy_threshold = CONFIG.get('safety', {}).get('force_buy_cash_threshold', 0.50)
                 
                 # 🔴 강제 매수 모드에서는 현금 비율 체크 건너뛰기
-                if cash_ratio_for_check <= 0.40 and krw_ratio < MIN_CASH_RATIO:  # 강제 매수 아닐 때만 체크
+                if cash_ratio_for_check <= force_buy_threshold and krw_ratio < MIN_CASH_RATIO:  # 강제 매수 아닐 때만 체크
                     print(f"  ⚠️ 현금 비율 부족으로 매수 제한: {krw_ratio:.1%}")
                     continue
                 
@@ -1345,9 +1358,10 @@ def execute_portfolio_trades(ai_signals, upbit, portfolio_summary, cycle_count=0
                 # 🔴 보유 중인 코인만 매도 제한 체크 (보유하지 않은 코인은 SELL 신호를 받아도 거래 안 되므로 제한 불필요)
                 current_coin_balance = upbit.get_balance(ticker)
                 if current_coin_balance > 0:
-                    # 연속 매도 제한: 최근 5회 중 4회 이상 매도면 건너뜀
-                    if recent_signals[coin].count('SELL') >= 4:
-                        log_decision('SELL', coin, False, '연속 매도 제한 (최근 5회 중 4회 이상)', {
+                    # 연속 매도 제한: 최근 5회 모두 매도면 건너뜀 (완화: 4회 → 5회)
+                    consecutive_sell_limit = CONFIG.get('trading_constraints', {}).get('consecutive_sell_limit', 5)
+                    if recent_signals[coin].count('SELL') >= consecutive_sell_limit:
+                        log_decision('SELL', coin, False, f'연속 매도 제한 (최근 5회 중 {consecutive_sell_limit}회 이상)', {
                             'recent_signals': recent_signals[coin],
                             'current_balance': f"{current_coin_balance:.8f}",
                             'confidence': f"{confidence:.1%}",
@@ -1954,36 +1968,65 @@ def setup_detailed_logging():
 # 신규/트렌드 코인 자동 투자 스레드 (적응형 체크 주기)
 # ============================================================================
 
+# 전역 변수: 관리 중인 신규코인 추적 (봇 재시작 시에도 유지 목적)
+MANAGED_NEW_COINS = set()
+
 def trend_coin_trading_loop(upbit, stop_event):
     """
     신규/트렌드 코인 자동 투자 - 독립 스레드 (공격적 적응형 체크 주기)
-    - 보유 중: 3분마다 빠른 모니터링 (손절 -5%, 부분익절 +5%, 전량익절 +8%)
+    - 보유 중: 3분마다 빠른 모니터링 (손절 -8%, 1차익절 +10%(40%), 2차익절 +15%(50%), 3차익절 +20%(100%))
     - 미보유: 20분마다 기회 탐색
     - stop_event로 종료 제어
     """
     logger = logging.getLogger(__name__)
+    global MANAGED_NEW_COINS
     
-    # 관리 중인 신규코인 추적 (이 함수에서 매수한 코인만)
-    managed_coins = set()
+    # 봇 시작 시 현재 보유 중인 신규코인 자동 등록 (재시작 대응)
+    try:
+        balances = upbit.get_balances()
+        for balance in balances:
+            currency = balance['currency']
+            
+            # KRW(현금) 제외
+            if currency == 'KRW':
+                continue
+            
+            ticker = f"KRW-{currency}"
+            
+            # 포트폴리오 코인이 아니고 보유량이 있으면 신규코인으로 간주
+            if ticker not in PORTFOLIO_COINS and float(balance['balance']) > 0:
+                # 가격 조회하여 유효한 코인인지 확인 (상장폐지 코인 제외)
+                try:
+                    price = pyupbit.get_current_price(ticker)
+                    if price and price > 0:
+                        MANAGED_NEW_COINS.add(ticker)
+                        logger.info(f"📌 [신규코인 복원] 기존 보유 코인 자동 등록: {ticker}")
+                        print(f"📌 [신규코인 복원] 기존 보유 코인 자동 등록: {ticker}")
+                    else:
+                        logger.warning(f"⚠️ {ticker} 가격 조회 불가 - 상장폐지 코인으로 추정, 건너뜀")
+                except:
+                    logger.warning(f"⚠️ {ticker} 유효성 확인 실패 - 건너뜀")
+    except Exception as e:
+        logger.warning(f"⚠️ 기존 신규코인 복원 실패: {e}")
     
     while not stop_event.is_set():
         try:
             logger.info(f"🔄 [신규코인] 트렌드 코인 체크 시작")
             print(f"\n🔄 [신규코인] 트렌드 코인 체크 ({datetime.now().strftime('%H:%M:%S')})")
             
-            # 신규코인 투자/관리 실행 (관리 중인 코인 전달 및 반환)
+            # 신규코인 투자/관리 실행 (전역 관리 중인 코인 전달 및 반환)
             current_holdings = execute_new_coin_trades(
                 upbit,
                 portfolio_coins=PORTFOLIO_COINS,
                 min_trade_amount=MIN_TRADE_AMOUNT,
                 invest_ratio=TREND_INVEST_RATIO,
-                check_interval_min=3,  # 3분 주기 전달 (공격적 관리 모드)
-                managed_coins=managed_coins
+                check_interval_min=5,  # 5분 주기 전달 (분할익절 전략)
+                managed_coins=MANAGED_NEW_COINS  # 전역 변수 사용
             )
             
-            # 적응형 체크 주기 결정 (공격적)
+            # 적응형 체크 주기 결정
             if current_holdings:
-                check_interval = 3  # 보유 중: 3분 (매우 빠른 모니터링)
+                check_interval = 5  # 보유 중: 5분 (분할익절 모니터링)
                 status = f"보유 중 {len(current_holdings)}개"
             else:
                 check_interval = TREND_CHECK_INTERVAL_MIN  # 미보유: 20분
@@ -2056,9 +2099,9 @@ def run_trading_bot():
         name="TrendCoinThread"
     )
     trend_thread.start()
-    logger.info("🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (공격적 전략: 3분 모니터링)")
-    print(f"🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (공격적 전략: 3분 모니터링)")
-    print(f"   📊 손절 -5% | 부분익절 +5%(50%) | 전량익절 +8%")
+    logger.info("🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (분할익절 전략: 5분 모니터링)")
+    print(f"🚀 [신규코인] 트렌드 코인 투자 스레드 시작 (분할익절 전략: 5분 모니터링)")
+    print(f"   📊 손절 -8% | 1차익절 +10%(40%) | 2차익절 +15%(50%) | 3차익절 +20%(100%)")
     
     cycle_count = 0
     
