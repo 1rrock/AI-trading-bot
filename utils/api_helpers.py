@@ -6,6 +6,7 @@ API 헬퍼 함수 모듈
 import pyupbit
 import logging
 import time
+from utils.delisted_coins import is_delisted
 
 
 def get_safe_price(ticker, max_retries=3):
@@ -19,6 +20,11 @@ def get_safe_price(ticker, max_retries=3):
     Returns:
         float: 현재 가격 또는 None
     """
+    # 상장폐지 코인 제외
+    if is_delisted(ticker):
+        logging.debug(f"🚫 {ticker} 상장폐지 코인 - 가격 조회 건너뜀")
+        return None
+    
     for attempt in range(max_retries):
         try:
             # API 부하 방지를 위한 짧은 대기
@@ -163,6 +169,11 @@ def get_safe_orderbook(ticker, max_retries=3):
     Returns:
         dict: 유효한 호가 정보 또는 None
     """
+    # 상장폐지 코인 제외
+    if is_delisted(ticker):
+        logging.debug(f"🚫 {ticker} 상장폐지 코인 - 호가 조회 건너뜀")
+        return None
+    
     for attempt in range(max_retries):
         try:
             # SSL 에러 방지를 위한 대기
@@ -215,6 +226,7 @@ def get_total_portfolio_value(upbit, max_retries=3):
     Returns:
         float: 총 자산 가치 (KRW)
     """
+    
     for attempt in range(max_retries):
         try:
             # SSL 에러 방지를 위한 대기
@@ -225,27 +237,37 @@ def get_total_portfolio_value(upbit, max_retries=3):
             balances = upbit.get_balances()
             
             for i, balance in enumerate(balances):
-                if balance['currency'] != 'KRW':
-                    ticker = f"KRW-{balance['currency']}"
+                currency = balance['currency']
+                
+                # KRW는 스킵
+                if currency == 'KRW':
+                    continue
+                
+                # 상장폐지 코인 제외
+                if is_delisted(currency):
+                    logging.debug(f"🚫 {currency} 상장폐지 코인 - 총 자산 계산에서 제외 (보유량: {balance['balance']})")
+                    continue
+                
+                ticker = f"KRW-{currency}"
+                
+                # API 부하 방지: 5개당 0.1초 대기
+                if i > 0 and i % 5 == 0:
+                    time.sleep(0.1)
+                
+                try:
+                    # 안전한 가격 조회 (재시도 포함)
+                    current_price = get_safe_price(ticker, max_retries=3)
                     
-                    # API 부하 방지: 5개당 0.1초 대기
-                    if i > 0 and i % 5 == 0:
-                        time.sleep(0.1)
-                    
-                    try:
-                        # 안전한 가격 조회 (재시도 포함)
-                        current_price = get_safe_price(ticker, max_retries=3)
-                        
-                        if current_price is not None and current_price > 0:
-                            coin_value = float(balance['balance']) * current_price
-                            total_value += coin_value
-                        else:
-                            # 가격 조회 실패 시 경고
-                            logging.warning(f"⚠️ {ticker} 가격 조회 실패 - 총 자산 계산에서 제외 (보유량: {balance['balance']})")
-                    except Exception as e:
-                        # 거래되지 않는 코인은 무시
-                        logging.debug(f"{ticker} 총자산 계산 중 오류 (무시): {e}")
-                        pass
+                    if current_price is not None and current_price > 0:
+                        coin_value = float(balance['balance']) * current_price
+                        total_value += coin_value
+                    else:
+                        # 가격 조회 실패 시 경고
+                        logging.warning(f"⚠️ {ticker} 가격 조회 실패 - 총 자산 계산에서 제외 (보유량: {balance['balance']})")
+                except Exception as e:
+                    # 거래되지 않는 코인은 무시
+                    logging.debug(f"{ticker} 총자산 계산 중 오류 (무시): {e}")
+                    pass
             
             return total_value
             

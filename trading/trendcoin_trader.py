@@ -13,6 +13,7 @@ import requests
 from datetime import datetime
 from utils.api_helpers import get_safe_orderbook, get_safe_price
 from utils.logger import log_decision
+from utils.delisted_coins import is_delisted
 
 # CryptoCompare API 설정 (무료, API 키 불필요)
 CRYPTOCOMPARE_NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
@@ -35,6 +36,10 @@ def get_top_trend_coins(n=5, min_trade_value=1_000_000_000, min_orderbook_depth=
     coin_data = []
     
     for ticker in tickers:
+        # 상장폐지 코인 건너뛰기
+        if is_delisted(ticker):
+            continue
+        
         try:
             # 24시간 OHLCV 데이터
             ohlcv = pyupbit.get_ohlcv(ticker, interval="day", count=2)

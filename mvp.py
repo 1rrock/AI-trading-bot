@@ -18,6 +18,7 @@ import logging
 from datetime import datetime, timedelta
 import numpy as np
 import threading
+from utils.delisted_coins import is_delisted
 
 # ============================================================================
 # 모듈 임포트
@@ -690,12 +691,13 @@ def calculate_dynamic_position_size(market_condition, base_ratio=BASE_TRADE_RATI
         
         # 총 자산 계산
         if upbit:
+            from utils.api_helpers import get_safe_price
             for coin in [c.split('-')[1] for c in PORTFOLIO_COINS]:
                 ticker = f"KRW-{coin}"
                 balance = upbit.get_balance(ticker)
                 if balance > 0:
                     try:
-                        current_price = pyupbit.get_current_price(ticker)
+                        current_price = get_safe_price(ticker)
                         if current_price:
                             total_value += balance * current_price
                     except:
@@ -748,6 +750,11 @@ def calculate_performance_metrics(upbit, portfolio_summary):
             
             # KRW는 이미 처리했으므로 스킵
             if currency == 'KRW':
+                continue
+            
+            # 상장폐지 코인 제외
+            if is_delisted(currency):
+                logging.debug(f"🚫 {currency} 상장폐지 코인 - 성과 계산에서 제외 (보유량: {balance_info['balance']})")
                 continue
             
             ticker = f"KRW-{currency}"
@@ -1865,9 +1872,15 @@ def get_current_portfolio_snapshot(upbit):
                     portfolio['KRW'] = balance_amount
                     total_value += balance_amount
                 else:
+                    # 상장폐지 코인 건너뛰기
+                    if is_delisted(currency):
+                        logging.debug(f"🚫 {currency} 상장폐지 코인 - 포트폴리오 스냅샷에서 제외")
+                        continue
+                    
                     ticker = f"KRW-{currency}"
                     try:
-                        orderbook = pyupbit.get_orderbook(ticker=ticker)
+                        from utils.api_helpers import get_safe_orderbook
+                        orderbook = get_safe_orderbook(ticker)
                         if orderbook and 'orderbook_units' in orderbook and orderbook['orderbook_units']:
                             current_price = orderbook['orderbook_units'][0]['ask_price']
                             value = balance_amount * current_price
@@ -2021,13 +2034,19 @@ def trend_coin_trading_loop(upbit, stop_event):
             if currency == 'KRW':
                 continue
             
+            # 상장폐지 코인 제외
+            if is_delisted(currency):
+                logger.info(f"🚫 {currency} 상장폐지 코인 - 복원 건너뜀")
+                continue
+            
             ticker = f"KRW-{currency}"
             
             # 포트폴리오 코인이 아니고 보유량이 있으면 신규코인으로 간주
             if ticker not in PORTFOLIO_COINS and float(balance['balance']) > 0:
                 # 가격 조회하여 유효한 코인인지 확인 (상장폐지 코인 제외)
                 try:
-                    price = pyupbit.get_current_price(ticker)
+                    from utils.api_helpers import get_safe_price
+                    price = get_safe_price(ticker)
                     if price and price > 0:
                         MANAGED_NEW_COINS.add(ticker)
                         logger.info(f"📌 [신규코인 복원] 기존 보유 코인 자동 등록: {ticker}")
