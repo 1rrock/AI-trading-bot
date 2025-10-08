@@ -17,13 +17,19 @@ from utils.logger import log_decision
 # CryptoCompare API 설정 (무료, API 키 불필요)
 CRYPTOCOMPARE_NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
 
-def get_top_trend_coins(n=5):
+def get_top_trend_coins(n=5, min_trade_value=1_000_000_000, min_orderbook_depth=5_000_000):
     """
-    트렌드 코인 탐지 (거래대금 + 변동률 하이브리드)
+    트렌드 코인 탐지 (거래대금 + 변동률 + 유동성 하이브리드)
     1. 거래대금(가격×거래량) 상위 30개 추출 → 실제 시장 관심도
     2. 그 중 24시간 변동률 높은 순으로 정렬 → 모멘텀
     3. 과도한 급등/급락 제외 (-30% ~ +50%) → 펌핑 회피
-    4. 상위 n개 반환
+    4. 🔥 유동성 필터링 (거래대금 10억+, 호가깊이 500만원+) → 체결 리스크 감소
+    5. 상위 n개 반환
+    
+    Args:
+        n: 반환할 코인 개수
+        min_trade_value: 최소 거래대금 (기본 10억원)
+        min_orderbook_depth: 최소 호가 깊이 (기본 500만원)
     """
     tickers = pyupbit.get_tickers(fiat="KRW")
     coin_data = []
@@ -39,6 +45,27 @@ def get_top_trend_coins(n=5):
             current_close = ohlcv['close'].iloc[-1]
             current_volume = ohlcv['volume'].iloc[-1]
             trade_value = current_close * current_volume
+            
+            # 🔥 유동성 필터 1: 거래대금 체크
+            if trade_value < min_trade_value:
+                continue
+            
+            # 🔥 유동성 필터 2: 호가 깊이 체크
+            try:
+                orderbook = pyupbit.get_orderbook(ticker)
+                if orderbook and 'orderbook_units' in orderbook:
+                    # 매도 1~5호가 총 수량 × 가격
+                    ask_depth = sum([
+                        unit['ask_size'] * unit['ask_price'] 
+                        for unit in orderbook['orderbook_units'][:5]
+                    ])
+                    
+                    if ask_depth < min_orderbook_depth:
+                        print(f"⚠️ {ticker} 호가깊이 부족: {ask_depth:,.0f}원 (최소 {min_orderbook_depth:,.0f}원)")
+                        continue
+            except Exception as e:
+                print(f"⚠️ {ticker} 호가 조회 실패: {e}")
+                continue
             
             # 24시간 변동률 계산
             prev_close = ohlcv['close'].iloc[-2]
@@ -59,6 +86,8 @@ def get_top_trend_coins(n=5):
     
     # 2단계: 그 중 변동률 높은 순 n개 (상승 우선)
     top_trend = sorted(top_by_value, key=lambda x: x['change_rate'], reverse=True)[:n]
+    
+    print(f"✅ 유동성 필터 통과: {len(top_trend)}개 코인 (거래대금 {min_trade_value/1e8:.0f}억+ / 호가깊이 {min_orderbook_depth/1e6:.0f}백만+)")
     
     return [coin['ticker'] for coin in top_trend]
 
