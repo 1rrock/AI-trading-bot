@@ -733,20 +733,39 @@ def calculate_dynamic_position_size(market_condition, base_ratio=BASE_TRADE_RATI
 def calculate_performance_metrics(upbit, portfolio_summary):
     """포트폴리오 성과 지표 계산 (현금 포함 총자산 기준)"""
     try:
+        from utils.api_helpers import get_safe_price
+        
         # 현재 보유 자산 조회
         krw_balance = upbit.get_balance("KRW")
         total_value = krw_balance  # 현금부터 시작
         coin_values = {}
         
-        for coin in [c.split('-')[1] for c in PORTFOLIO_COINS]:
-            ticker = f"KRW-{coin}"
-            balance = upbit.get_balance(ticker)
+        # 모든 보유 코인 조회 (메인 + 신규 코인 모두 포함)
+        balances = upbit.get_balances()
+        
+        for balance_info in balances:
+            currency = balance_info['currency']
+            
+            # KRW는 이미 처리했으므로 스킵
+            if currency == 'KRW':
+                continue
+            
+            ticker = f"KRW-{currency}"
+            balance = float(balance_info['balance'])
             
             if balance > 0:
-                current_price = portfolio_summary.get("coins", {}).get(coin, {}).get("current_price", 0)
+                # portfolio_summary에서 가격 찾기, 없으면 API 직접 조회
+                current_price = portfolio_summary.get("coins", {}).get(currency, {}).get("current_price", 0)
+                
+                if current_price == 0:
+                    # 신규 코인이거나 portfolio_summary에 없는 경우 직접 조회
+                    current_price = get_safe_price(ticker)
+                    if current_price is None:
+                        current_price = 0
+                
                 coin_value = balance * current_price
                 total_value += coin_value  # 총자산에 코인 가치 추가
-                coin_values[coin] = {
+                coin_values[currency] = {
                     "balance": balance,
                     "value": coin_value,
                     "percentage": 0  # 나중에 계산
@@ -777,9 +796,20 @@ def print_performance_summary(performance):
     print(f"총 자산: {performance['total_value']:,.0f}원 (현금 + 코인)")
     print(f"현금 비중: {performance['krw_percentage']:.1f}% ({performance['krw_balance']:,.0f}원)")
     
-    print(f"\n🪙 코인별 보유 현황:")
+    # 메인 코인과 신규 코인 구분
+    main_coins = [c.split('-')[1] for c in PORTFOLIO_COINS]
+    
+    print(f"\n🪙 메인 코인 보유 현황:")
     for coin, data in performance['coin_values'].items():
-        print(f"  {coin}: {data['percentage']:.1f}% ({data['value']:,.0f}원)")
+        if coin in main_coins:
+            print(f"  {coin}: {data['percentage']:.1f}% ({data['value']:,.0f}원)")
+    
+    # 신규 코인이 있는 경우 별도 표시
+    new_coins = {k: v for k, v in performance['coin_values'].items() if k not in main_coins}
+    if new_coins:
+        print(f"\n🚀 신규 코인 보유 현황:")
+        for coin, data in new_coins.items():
+            print(f"  {coin}: {data['percentage']:.1f}% ({data['value']:,.0f}원)")
     
     # 간단한 알림 시스템
     check_performance_alerts(performance)
