@@ -169,6 +169,9 @@ REBALANCING_DEVIATION_THRESHOLD = CONFIG["safety"]["rebalancing_deviation_thresh
 CHECK_INTERVALS = CONFIG["check_intervals"]
 HIGH_VOLATILITY_THRESHOLD = CONFIG["market_conditions"]["high_volatility_threshold"]
 
+# 전역 변수: 최신 시장 정보 (신규코인 스레드에서 참조)
+LAST_MARKET_SUMMARY = None
+
 
 # ============================================================================
 # AI 신호 생성 함수
@@ -2070,7 +2073,8 @@ def trend_coin_trading_loop(upbit, stop_event):
                 min_trade_amount=MIN_TRADE_AMOUNT,
                 invest_ratio=TREND_INVEST_RATIO,
                 check_interval_min=5,  # 5분 주기 전달 (분할익절 전략)
-                managed_coins=MANAGED_NEW_COINS  # 전역 변수 사용
+                managed_coins=MANAGED_NEW_COINS,  # 전역 변수 사용
+                market_summary=LAST_MARKET_SUMMARY  # 최신 시장 정보 전달
             )
             
             # 적응형 체크 주기 결정
@@ -2194,6 +2198,13 @@ def run_trading_bot():
             
             # 3. 포트폴리오 요약 생성
             portfolio_summary = make_portfolio_summary(portfolio_data, fng, news, calculate_rsi)
+            
+            # 🚨 전역 변수 업데이트: 신규코인 스레드에서 참조
+            global LAST_MARKET_SUMMARY
+            LAST_MARKET_SUMMARY = {
+                "fear_greed_index": portfolio_summary.get("fear_greed_index", {}),
+                "market_condition": portfolio_summary.get("market_condition", {})
+            }
             
             # 4. AI 분석 실행
             print("\n🤖 AI 포트폴리오 분석 중...")

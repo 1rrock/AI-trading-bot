@@ -272,7 +272,10 @@ def ai_search_coin_news(coin_name, ticker=None):
 
 
 # ==================== 투자 전략 설정 ====================
-MIN_TRADE_AMOUNT = 20000  # 최소 투자금 (5,000원 → 20,000원)
+MIN_TRADE_AMOUNT = 25000  # 최소 투자금 (20,000원 → 25,000원으로 상향)
+# 이유: 1차 익절(70%) 후 남은 30%가 -25% 하락해도 5,000원 이상 유지
+# 계산: 25,000 × 1.10 × 0.30 × 0.75 = 6,187원 > 5,000원 ✅
+
 MAX_NEW_COIN_HOLDINGS = 10  # 최대 보유 코인 수 제한
 STOP_LOSS_THRESHOLD = -0.05  # 손절 기준 (-8% → -5%)
 
@@ -283,12 +286,13 @@ PROFIT_TAKE_STAGES = {
 }
 # =========================================================
 
-def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_ratio=0.05, check_interval_min=20, managed_coins=None):
+def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_ratio=0.05, check_interval_min=20, managed_coins=None, market_summary=None):
     """
     신규/트렌드 코인에 소액 투자 및 짧은 주기 모니터링
     - invest_ratio: 전체 자산의 몇 %를 신규코인에 분산 투자할지
     - check_interval_min: 신규 코인만 몇 분마다 재체크할지
     - managed_coins: 이 함수에서 관리 중인 신규코인 set (손절/익절 대상)
+    - market_summary: 시장 상황 정보 (공포탐욕지수, 변동성 등)
     - 보유 중인 코인: 손절/익절 자동 실행
     - 반환: 현재 관리 중인 신규코인 set
     """
@@ -332,8 +336,25 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
             balance_amount = float(balance['balance'])
             current_value = balance_amount * current_price
             
+            # 🚨 업비트 최소 주문금액 체크 (5,000원)
+            UPBIT_MIN_ORDER = 5000
+            
             # 손절 조건: -5% 이하 (빠른 손절로 손실 최소화)
             if profit_rate <= STOP_LOSS_THRESHOLD * 100:
+                if current_value < UPBIT_MIN_ORDER:
+                    print(f"⚠️ [신규코인 손절 불가] {coin_name}: {profit_rate:.1f}% 손실, "
+                          f"보유금액 {current_value:,.0f}원 < 최소주문 {UPBIT_MIN_ORDER:,.0f}원")
+                    print(f"   → 추가 하락 시 손실 확대 가능 (현재 managed_coins에서 제외하여 신규 매수 방지)")
+                    managed_coins.discard(ticker)  # 관리 목록에서 제거하여 재매수 방지
+                    log_decision(
+                        action="SELL",
+                        coin=coin_name,
+                        allowed=False,
+                        reason=f"신규코인 손절 불가: {profit_rate:.1f}% (금액 {current_value:.0f}원 < 최소 {UPBIT_MIN_ORDER}원)",
+                        context={"ticker": ticker, "profit_rate": profit_rate, "value": current_value}
+                    )
+                    continue
+                
                 print(f"🚨 [신규코인 손절] {coin_name}: {profit_rate:.1f}% 손실 → 즉시 매도")
                 result = upbit.sell_market_order(ticker, balance_amount)
                 if result:
@@ -350,55 +371,125 @@ def execute_new_coin_trades(upbit, portfolio_coins, min_trade_amount, invest_rat
             
             # 2차 익절 조건: +15% 이상 (전량 매도)
             if profit_rate >= PROFIT_TAKE_STAGES['stage2']['threshold'] * 100:
-                print(f"💰💰 [신규코인 2차익절] {coin_name}: {profit_rate:.1f}% 수익 → 전량 매도")
-                result = upbit.sell_market_order(ticker, balance_amount)
-                if result:
-                    print(f"✅ {coin_name} 2차익절 완료: {current_value:,.0f}원 (수익: +{profit_rate:.1f}%)")
-                    managed_coins.discard(ticker)  # 관리 목록에서 제거
-                    log_decision(
-                        action="SELL",
-                        coin=coin_name,
-                        allowed=True,
-                        reason=f"신규코인 2차익절: {profit_rate:.1f}% (전량)",
-                        context={"ticker": ticker, "profit_rate": profit_rate, "value": current_value}
-                    )
+                if current_value < UPBIT_MIN_ORDER:
+                    print(f"⚠️ [신규코인 2차익절 불가] {coin_name}: {profit_rate:.1f}% 수익, "
+                          f"보유금액 {current_value:,.0f}원 < 최소주문 {UPBIT_MIN_ORDER:,.0f}원")
+                    print(f"   → 보유 유지 (추가 상승 대기)")
+                else:
+                    print(f"💰💰 [신규코인 2차익절] {coin_name}: {profit_rate:.1f}% 수익 → 전량 매도")
+                    result = upbit.sell_market_order(ticker, balance_amount)
+                    if result:
+                        print(f"✅ {coin_name} 2차익절 완료: {current_value:,.0f}원 (수익: +{profit_rate:.1f}%)")
+                        managed_coins.discard(ticker)  # 관리 목록에서 제거
+                        log_decision(
+                            action="SELL",
+                            coin=coin_name,
+                            allowed=True,
+                            reason=f"신규코인 2차익절: {profit_rate:.1f}% (전량)",
+                            context={"ticker": ticker, "profit_rate": profit_rate, "value": current_value}
+                        )
                 continue
             
             # 1차 익절 조건: +10% 이상 (70% 회수)
             if profit_rate >= PROFIT_TAKE_STAGES['stage1']['threshold'] * 100 and current_value >= MIN_TRADE_AMOUNT:
                 partial_amount = balance_amount * PROFIT_TAKE_STAGES['stage1']['sell_ratio']
+                partial_value = partial_amount * current_price
+                
+                # 매도 금액 체크
+                if partial_value < UPBIT_MIN_ORDER:
+                    print(f"⚠️ [신규코인 1차익절 불가] {coin_name}: {profit_rate:.1f}% 수익, "
+                          f"70% 매도금액 {partial_value:,.0f}원 < 최소주문 {UPBIT_MIN_ORDER:,.0f}원")
+                    print(f"   → 2차익절 대기 (+15% 전량 매도)")
+                    continue
+                
+                # 🚨 중요: 남은 30% 가치가 5,000원 미만이 될 위험 체크
+                remaining_amount = balance_amount * (1 - PROFIT_TAKE_STAGES['stage1']['sell_ratio'])
+                remaining_value = remaining_amount * current_price
+                
+                # 남은 30%가 이미 5,000원 미만이면 전량 매도 (안전)
+                if remaining_value < UPBIT_MIN_ORDER:
+                    print(f"⚠️ [신규코인 1차익절 → 전량 매도] {coin_name}: {profit_rate:.1f}% 수익")
+                    print(f"   이유: 70% 매도 후 남은 30% = {remaining_value:,.0f}원 < {UPBIT_MIN_ORDER:,.0f}원")
+                    print(f"   → 하락 시 손절 불가능하므로 전량 매도로 전환")
+                    
+                    # 전량 매도
+                    result = upbit.sell_market_order(ticker, balance_amount)
+                    if result:
+                        print(f"✅ {coin_name} 전량 매도 완료: {current_value:,.0f}원 (수익: +{profit_rate:.1f}%)")
+                        managed_coins.discard(ticker)
+                        log_decision(
+                            action="SELL",
+                            coin=coin_name,
+                            allowed=True,
+                            reason=f"신규코인 1차익절(전량): {profit_rate:.1f}% (남은 30% < 5,000원 위험 회피)",
+                            context={"ticker": ticker, "profit_rate": profit_rate, "value": current_value, "reason": "remaining_too_low"}
+                        )
+                    continue
+                
+                # 정상 1차 익절 (70% 매도)
                 print(f"💵 [신규코인 1차익절] {coin_name}: {profit_rate:.1f}% → 70% 회수")
                 result = upbit.sell_market_order(ticker, partial_amount)
                 if result:
                     sold_value = partial_amount * current_price
-                    print(f"✅ {coin_name} 1차익절 완료: {sold_value:,.0f}원 (남은 30%는 +15% 목표)")
+                    print(f"✅ {coin_name} 1차익절 완료: {sold_value:,.0f}원 (남은 30%: {remaining_value:,.0f}원 → +15% 목표)")
                     log_decision(
                         action="SELL",
                         coin=coin_name,
-                        allowed=True,
-                        reason=f"신규코인 1차익절: {profit_rate:.1f}% (70%)",
-                        context={"ticker": ticker, "profit_rate": profit_rate, "sold_value": sold_value}
-                    )
+                            allowed=True,
+                            reason=f"신규코인 1차익절: {profit_rate:.1f}% (70%)",
+                            context={"ticker": ticker, "profit_rate": profit_rate, "sold_value": sold_value}
+                        )
                 continue
             
             # 보유 중 (모니터링) - currently_held에 추가하여 최대 보유 수 체크에 반영
             currently_held.add(ticker)
             
-            if profit_rate > 0:
-                if profit_rate >= 15:
-                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (2차 익절 목표 도달)")
-                elif profit_rate >= 10:
-                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (1차 익절 목표 도달, 2차: +15%)")
+            # 5,000원 미만 경고
+            if current_value < UPBIT_MIN_ORDER:
+                if profit_rate < 0:
+                    print(f"🔴 [신규코인 보유] {coin_name}: {profit_rate:.1f}% | {current_value:,.0f}원 "
+                          f"⚠️ 손절 불가 (< {UPBIT_MIN_ORDER:,.0f}원)")
                 else:
-                    print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% (1차 목표: +10%, 2차: +15%)")
+                    print(f"🟡 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% | {current_value:,.0f}원 "
+                          f"⚠️ 익절 불가 (< {UPBIT_MIN_ORDER:,.0f}원)")
             else:
-                print(f"📉 [신규코인 보유] {coin_name}: {profit_rate:.1f}% (손절: -5%)")
+                if profit_rate > 0:
+                    if profit_rate >= 15:
+                        print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% | {current_value:,.0f}원 (2차 익절 목표 도달)")
+                    elif profit_rate >= 10:
+                        print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% | {current_value:,.0f}원 (1차 익절 목표 도달, 2차: +15%)")
+                    else:
+                        print(f"📈 [신규코인 보유] {coin_name}: +{profit_rate:.1f}% | {current_value:,.0f}원 (1차 목표: +10%, 2차: +15%)")
+                else:
+                    print(f"📉 [신규코인 보유] {coin_name}: {profit_rate:.1f}% | {current_value:,.0f}원 (손절: -5%)")
                 
         except Exception as e:
             print(f"❌ {coin_name} 모니터링 오류: {e}")
             continue
     
     # 2. 새로운 투자 기회 탐색 (보유 중이 아닐 때만)
+    # 🚨 급락장 방어: 공포탐욕지수 30 이하 시 신규 매수 중단
+    if market_summary:
+        fng_value = market_summary.get("fear_greed_index", {}).get("value", 50)
+        try:
+            fng_value = int(fng_value) if fng_value else 50
+        except:
+            fng_value = 50
+        
+        # 공포지수 30 이하: 신규 매수 차단
+        if fng_value <= 30:
+            print(f"🛑 [급락장 방어] 공포탐욕지수 {fng_value} (Fear) - 신규 매수 중단 (현금 보존)")
+            return currently_held
+        
+        # 시장 상황 확인
+        market_condition = market_summary.get("market_condition", {})
+        avg_change = market_condition.get("avg_change", 0)
+        
+        # 평균 변동 -5% 이하: 급락장
+        if avg_change <= -5:
+            print(f"🛑 [급락장 방어] 평균 변동 {avg_change:.1f}% - 신규 매수 중단 (현금 보존)")
+            return currently_held
+    
     # 최대 보유 코인 수 체크
     if len(currently_held) >= MAX_NEW_COIN_HOLDINGS:
         print(f"⚠️ 최대 보유 코인 수({MAX_NEW_COIN_HOLDINGS}개) 도달 - 신규 매수 중단")
